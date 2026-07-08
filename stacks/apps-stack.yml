@@ -1,0 +1,3 @@
+# Angular, Vue, Laravel/PHP, C#/.NET application containers.
+# Tracked in https://github.com/suhacb/swarm/issues/5 — not yet implemented.
+# Needs a registry decision (GHCR vs Docker Hub) before writing this stack.

@@ -1,0 +1,117 @@
+# Keycloak spans all three networks: public-ingress (Nginx must reach it),
+# app-mesh (backends validate tokens against it), data-mesh (it talks to its
+# own DB). Its DB sits on data-mesh only — never reachable from the outside.
+networks:
+  public-ingress:
+    external: true
+  app-mesh:
+    external: true
+  data-mesh:
+    external: true
+
+secrets:
+  keycloak_db_password:
+    external: true
+  keycloak_admin_password:
+    external: true
+
+services:
+  keycloak-db:
+    image: postgres:16-alpine
+    networks:
+      - data-mesh
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD_FILE: /run/secrets/keycloak_db_password
+    secrets:
+      - keycloak_db_password
+    # Tuned down from Postgres defaults to fit the ~250M budget.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=64MB"
+      - "-c"
+      - "max_connections=30"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "maintenance_work_mem=32MB"
+    volumes:
+      - /opt/swarm-data/keycloak-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 250M
+      restart_policy:
+        condition: any
+        delay: 5s
+      placement:
+        constraints:
+          - node.role == manager
+
+  keycloak:
+    # Built via images/keycloak/Dockerfile — see that file for why.
+    image: local/keycloak:26.0-optimized
+    networks:
+      - public-ingress
+      - app-mesh
+      - data-mesh
+    environment:
+      KC_DB_URL_HOST: keycloak-db
+      KC_DB_URL_PORT: "5432"
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      # No single canonical hostname (public + LAN names both resolve here),
+      # so Keycloak must derive issuer/redirect URLs from each request's
+      # Host header instead of a fixed KC_HOSTNAME.
+      KC_HOSTNAME_STRICT: "false"
+      # Nginx terminates TLS and forwards these; Keycloak trusts them to know
+      # the original request was HTTPS even though this hop is plain HTTP.
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      # Legacy admin bootstrap vars (pre-26) and current ones (26+) — set
+      # both since it's harmless and avoids chasing the exact cutover version.
+      KEYCLOAK_ADMIN: admin
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+    secrets:
+      - keycloak_db_password
+      - keycloak_admin_password
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >
+        export KC_DB_PASSWORD="$$(cat /run/secrets/keycloak_db_password)" &&
+        export KEYCLOAK_ADMIN_PASSWORD="$$(cat /run/secrets/keycloak_admin_password)" &&
+        export KC_BOOTSTRAP_ADMIN_PASSWORD="$$(cat /run/secrets/keycloak_admin_password)" &&
+        exec /opt/keycloak/bin/kc.sh start --optimized
+    healthcheck:
+      # No curl in this image; plain-bash TCP probe against the management
+      # health endpoint instead.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 750M
+      restart_policy:
+        # Swarm ignores depends_on for start order; Keycloak may boot before
+        # keycloak-db is ready, so let it crash-loop with a backoff until the
+        # DB comes up rather than only trying once.
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager

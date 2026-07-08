@@ -1,0 +1,3 @@
+# Postgres (app db) + MySQL + phpMyAdmin, on data-mesh only.
+# Tracked in https://github.com/suhacb/swarm/issues/3 — not yet implemented.
+# Blocked on Phase 1 (this repo's networks + Docker Secrets pattern).
