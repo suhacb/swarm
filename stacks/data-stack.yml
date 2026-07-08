@@ -1,0 +1,63 @@
+# Shared data layer. Postgres here serves ANY service that needs a
+# relational database (Keycloak first; Gitea/app databases later) — one
+# Postgres process hosting multiple databases is far cheaper on 8GB than a
+# dedicated instance per service, and that's exactly what Postgres is built
+# for: one server process, many independent databases/roles.
+#
+# Use scripts/create-postgres-db.sh <service-name> to provision a new
+# tenant: it creates a role + database named after the service (matching
+# convention: role == database == service name) and the matching
+# <service>_db_password secret for that service's own stack to consume.
+#
+# MySQL + phpMyAdmin are still pending — see
+# https://github.com/suhacb/swarm/issues/3
+networks:
+  data-mesh:
+    external: true
+
+secrets:
+  postgres_admin_password:
+    external: true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    networks:
+      - data-mesh
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+    secrets:
+      - postgres_admin_password
+    # Sized for one tenant (Keycloak) today. Bump shared_buffers,
+    # max_connections, and the memory limit below as more databases move in.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=64MB"
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "maintenance_work_mem=32MB"
+    volumes:
+      - /opt/swarm-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 250M
+      restart_policy:
+        condition: any
+        delay: 5s
+      placement:
+        constraints:
+          - node.role == manager

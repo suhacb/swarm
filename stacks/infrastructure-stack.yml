@@ -1,0 +1,83 @@
+# Keycloak spans all three networks: public-ingress (Nginx must reach it),
+# app-mesh (backends validate tokens against it), data-mesh (it talks to
+# Postgres). Its database lives on the shared Postgres server in
+# data-stack.yml, not a dedicated instance — see that file for why.
+networks:
+  public-ingress:
+    external: true
+  app-mesh:
+    external: true
+  data-mesh:
+    external: true
+
+secrets:
+  keycloak_db_password:
+    external: true
+  keycloak_admin_password:
+    external: true
+
+services:
+  keycloak:
+    # Built via images/keycloak/Dockerfile — see that file for why.
+    image: local/keycloak:26.0-optimized
+    networks:
+      - public-ingress
+      - app-mesh
+      - data-mesh
+    environment:
+      # data_postgres, not just "postgres" — cross-stack service discovery
+      # on a shared external network resolves the full <stack>_<service>
+      # name; there's no compose-style short alias unless deployed together.
+      KC_DB_URL_HOST: data_postgres
+      KC_DB_URL_PORT: "5432"
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      # No single canonical hostname (public + LAN names both resolve here),
+      # so Keycloak must derive issuer/redirect URLs from each request's
+      # Host header instead of a fixed KC_HOSTNAME.
+      KC_HOSTNAME_STRICT: "false"
+      # Nginx terminates TLS and forwards these; Keycloak trusts them to know
+      # the original request was HTTPS even though this hop is plain HTTP.
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      # Legacy admin bootstrap vars (pre-26) and current ones (26+) — set
+      # both since it's harmless and avoids chasing the exact cutover version.
+      # This only creates the account on a fresh DB; run
+      # scripts/bootstrap-keycloak-admin.sh once after the first deploy to
+      # force a password reset + TOTP enrollment on next login.
+      KEYCLOAK_ADMIN: suhacb
+      KC_BOOTSTRAP_ADMIN_USERNAME: suhacb
+    secrets:
+      - keycloak_db_password
+      - keycloak_admin_password
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >
+        export KC_DB_PASSWORD="$$(cat /run/secrets/keycloak_db_password)" &&
+        export KEYCLOAK_ADMIN_PASSWORD="$$(cat /run/secrets/keycloak_admin_password)" &&
+        export KC_BOOTSTRAP_ADMIN_PASSWORD="$$(cat /run/secrets/keycloak_admin_password)" &&
+        exec /opt/keycloak/bin/kc.sh start --optimized
+    healthcheck:
+      # No curl in this image; plain-bash TCP probe against the management
+      # health endpoint instead.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 750M
+      restart_policy:
+        # Swarm ignores depends_on for start order, and Keycloak may even
+        # boot before the data stack is deployed at all — let it crash-loop
+        # with a backoff until Postgres is reachable rather than only trying
+        # once.
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager

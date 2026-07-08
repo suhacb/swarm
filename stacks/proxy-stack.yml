@@ -1,0 +1,46 @@
+networks:
+  public-ingress:
+    external: true
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    networks:
+      - public-ingress
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Bind-mounted (not Swarm configs) so editing files under config/nginx/
+      # on the repo checkout takes effect on `docker service update --force`
+      # without juggling versioned config objects.
+      - /Users/blazsuhac/Documents/projects/swarm/config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /Users/blazsuhac/Documents/projects/swarm/config/nginx/conf.d:/etc/nginx/conf.d:ro
+      # NOT /etc/letsencrypt directly: Certbot locks live/ and archive/ down
+      # to root:wheel 0700, and Docker Desktop's file-sharing bridge runs as
+      # the logged-in user, not root — it can't read those paths at any
+      # container privilege level. scripts/certbot-deploy-hook.sh keeps this
+      # copy in sync with every renewal; see docs/DEPLOY.md.
+      - /opt/swarm-data/certs/live/suhac.eu:/etc/letsencrypt/live/suhac.eu:ro
+    healthcheck:
+      # 127.0.0.1, not localhost: this image's /etc/hosts resolves localhost
+      # to ::1 first, but nginx (below) only listens on IPv4 — wget would
+      # always get connection refused and Swarm would kill an otherwise-
+      # healthy container.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      placement:
+        constraints:
+          - node.role == manager
