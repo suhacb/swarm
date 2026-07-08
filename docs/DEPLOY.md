@@ -8,9 +8,8 @@ Sharing.
 
 - **Settings → Resources → Memory**: check the VM's allocation leaves enough
   headroom for macOS itself on an 8GB box (e.g. 5–6GB to the VM, not 8GB).
-- **Settings → Resources → File Sharing**: add `/etc/letsencrypt` if it's not
-  already covered — the proxy stack bind-mounts it read-only, and Docker
-  Desktop won't surface paths outside its shared list.
+- **Settings → Resources → File Sharing**: add `/opt` if it's not already
+  covered (see step 3.5 below for why it's `/opt`, not `/etc/letsencrypt`).
 
 ## 1. Initialize the swarm (first time only)
 
@@ -30,6 +29,35 @@ docker swarm init --advertise-addr 10.10.10.202
 sudo mkdir -p /opt/swarm-data/postgres
 sudo chown "$(whoami)" /opt/swarm-data/postgres
 ```
+
+## 3.5. Make the wildcard cert readable by the proxy stack
+
+Certbot locks `/etc/letsencrypt/live/` and `archive/` down to `root:wheel`
+mode `0700`. Docker Desktop's file-sharing bridge on macOS runs as your own
+user, not root — it cannot read those paths **at any container privilege
+level**, including a container running as root. The fix is a plain-permission
+copy the proxy stack reads instead of the original:
+
+```bash
+sudo mkdir -p /opt/swarm-data/certs/live/suhac.eu
+sudo cp /etc/letsencrypt/live/suhac.eu/fullchain.pem /etc/letsencrypt/live/suhac.eu/privkey.pem /opt/swarm-data/certs/live/suhac.eu/
+sudo chown -R "$(whoami)" /opt/swarm-data/certs
+chmod 644 /opt/swarm-data/certs/live/suhac.eu/*.pem
+```
+
+This copy goes stale on each renewal (twice daily, per the existing
+LaunchDaemon). To keep it in sync automatically, wire
+`scripts/certbot-deploy-hook.sh` into your **existing** certbot renewal setup
+yourself (this repo doesn't touch
+`/Library/LaunchDaemons/eu.suhac.certbot-renew.plist`):
+
+```bash
+sudo certbot renew --deploy-hook /Users/blazsuhac/Documents/projects/swarm/scripts/certbot-deploy-hook.sh
+```
+
+Run that once to confirm it works, then add the same `--deploy-hook` flag to
+whatever command the LaunchDaemon already runs, and `sudo launchctl kickstart
+-k system/eu.suhac.certbot-renew` to pick up the change.
 
 ## 4. Deploy the shared Postgres server
 
@@ -150,13 +178,8 @@ doing per-realm once Gitea/apps are wired up to Keycloak, not before.
 
 ## Known follow-ups (not blocking, but worth doing)
 
-- **Cert permission hardening**: Nginx currently runs its worker processes as
-  root so it can read the root-owned `privkey.pem`. Cleaner fix: extend the
-  certbot renewal LaunchDaemon with a `--deploy-hook` that copies
-  `fullchain.pem`/`privkey.pem` to a location with relaxed permissions (e.g.
-  `chmod 644`) and reloads the nginx service
-  (`docker service update --force proxy_nginx`), then drop `user root;` from
-  `config/nginx/nginx.conf` in favor of the image's default non-root user.
+- **Wire up the certbot deploy-hook** (step 3.5) so the cert copy doesn't go
+  stale after the first renewal — a manual copy only lasts until then.
 - **Keycloak memory headroom**: 750M is tight for Keycloak. Watch
   `docker service logs infra_keycloak` and `docker stats` after first deploy,
   especially during realm imports or heavy admin console use, for OOM kills.

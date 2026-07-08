@@ -16,10 +16,12 @@ services:
       # without juggling versioned config objects.
       - /Users/blazsuhac/Documents/projects/swarm/config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - /Users/blazsuhac/Documents/projects/swarm/config/nginx/conf.d:/etc/nginx/conf.d:ro
-      # Whole letsencrypt tree, not just live/suhac.eu/ — the files under
-      # live/ are symlinks into ../archive/, so mounting live/ alone breaks
-      # them.
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # NOT /etc/letsencrypt directly: Certbot locks live/ and archive/ down
+      # to root:wheel 0700, and Docker Desktop's file-sharing bridge runs as
+      # the logged-in user, not root — it can't read those paths at any
+      # container privilege level. scripts/certbot-deploy-hook.sh keeps this
+      # copy in sync with every renewal; see docs/DEPLOY.md.
+      - /opt/swarm-data/certs/live/suhac.eu:/etc/letsencrypt/live/suhac.eu:ro
     healthcheck:
       # 127.0.0.1, not localhost: this image's /etc/hosts resolves localhost
       # to ::1 first, but nginx (below) only listens on IPv4 — wget would
