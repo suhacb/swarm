@@ -14,6 +14,8 @@ service configs.
 │   └── keycloak/Dockerfile    # pre-built ("optimized") Keycloak image
 ├── config/
 │   └── nginx/                 # bind-mounted into the proxy stack
+├── scripts/
+│   └── bootstrap-keycloak-admin.sh  # forces password reset + TOTP on admin
 ├── stacks/
 │   ├── infrastructure-stack.yml  # Keycloak + its Postgres DB
 │   ├── proxy-stack.yml           # Nginx reverse proxy / TLS termination

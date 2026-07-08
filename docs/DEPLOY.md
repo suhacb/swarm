@@ -45,6 +45,15 @@ secrets are immutable — you can't update in place), e.g.
 `keycloak_admin_password_v2`, update the stack file to reference it, then
 `docker stack deploy` again.
 
+**`keycloak_db_password` is a special case**: Postgres only applies
+`POSTGRES_PASSWORD_FILE` once, when it initializes an empty data directory.
+Rotating this secret and redeploying does **not** change the password
+Postgres actually has — Keycloak will get `FATAL: password authentication
+failed for user "keycloak"` because it's now presenting a password Postgres
+was never told about. To rotate it for real, also run `ALTER USER keycloak
+WITH PASSWORD '<new password>';` inside the `keycloak-db` container (`docker
+exec -it <container> psql -U keycloak`) so both sides agree.
+
 ## 5. Build the optimized Keycloak image
 
 ```bash
@@ -63,7 +72,21 @@ docker stack deploy -c stacks/infrastructure-stack.yml infra
 docker stack deploy -c stacks/proxy-stack.yml proxy
 ```
 
-## 7. Verify
+## 7. Force a password reset + MFA enrollment on the admin account
+
+Run this once, right after the *first* deploy (i.e. while the password you
+put in `keycloak_admin_password` is still the one that actually works):
+
+```bash
+./scripts/bootstrap-keycloak-admin.sh
+```
+
+It flags the `suhacb` admin account so its next login requires setting a new
+password and enrolling TOTP (Google Authenticator or any RFC 6238 app —
+Keycloak's default OTP policy already matches Google Authenticator's
+settings, no changes needed). Safe to re-run.
+
+## 8. Verify
 
 ```bash
 docker service ls
@@ -73,8 +96,31 @@ docker service logs -f proxy_nginx
 
 Then browse to `https://keycloak.suhac.eu` and `https://keycloak.lan.suhac.eu`
 — both should hit the same Keycloak instance. Log in to the admin console at
-`/admin` with user `admin` and the password you put in
-`keycloak_admin_password`.
+`/admin` with user `suhacb` and the password you put in
+`keycloak_admin_password`. You should immediately be prompted to set a new
+password and scan a QR code to enroll Google Authenticator.
+
+## MFA options (for later realms too)
+
+Keycloak's built-in second-factor options, for when Gitea/apps get their own
+realms:
+
+- **TOTP** (what's enabled above) — works with Google Authenticator, Authy,
+  FreeOTP, Microsoft Authenticator, etc. Default policy (SHA1, 6 digits, 30s)
+  is already Google Authenticator-compatible.
+- **WebAuthn/FIDO2** — hardware keys, Touch ID, Windows Hello. Built in, but
+  more setup (Authentication → WebAuthn Policy) and less relevant for a
+  single-admin home lab.
+- **Recovery codes** — self-service backup codes, users can enable via the
+  Account Console once TOTP is set up.
+- **SMS/email OTP** — *not* built into core Keycloak, needs a third-party SPI
+  provider. Skip unless there's a real need.
+
+The steps above force MFA on the `suhacb` account specifically. To make TOTP
+mandatory for *all* users of a given realm, change the "OTP Form" execution
+in that realm's browser authentication flow from `CONDITIONAL` to
+`REQUIRED` (Authentication → browser flow, in the admin console) — worth
+doing per-realm once Gitea/apps are wired up to Keycloak, not before.
 
 ## Known follow-ups (not blocking, but worth doing)
 

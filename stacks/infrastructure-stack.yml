@@ -80,8 +80,11 @@ services:
       KC_HTTP_ENABLED: "true"
       # Legacy admin bootstrap vars (pre-26) and current ones (26+) — set
       # both since it's harmless and avoids chasing the exact cutover version.
-      KEYCLOAK_ADMIN: admin
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      # This only creates the account on a fresh DB; run
+      # scripts/bootstrap-keycloak-admin.sh once after the first deploy to
+      # force a password reset + TOTP enrollment on next login.
+      KEYCLOAK_ADMIN: suhacb
+      KC_BOOTSTRAP_ADMIN_USERNAME: suhacb
     secrets:
       - keycloak_db_password
       - keycloak_admin_password
