@@ -1,0 +1,33 @@
+# Scratch / notes
+tmp.md
+*.tmp
+*.bak
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+
+# Docker Swarm runtime data (bind-mounted volumes, stack state)
+data/
+volumes/
+*/data/
+*/volumes/
+
+# Compose overrides meant to stay local
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# Logs
+*.log
+logs/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
