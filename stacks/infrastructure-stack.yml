@@ -1,6 +1,7 @@
 # Keycloak spans all three networks: public-ingress (Nginx must reach it),
-# app-mesh (backends validate tokens against it), data-mesh (it talks to its
-# own DB). Its DB sits on data-mesh only — never reachable from the outside.
+# app-mesh (backends validate tokens against it), data-mesh (it talks to
+# Postgres). Its database lives on the shared Postgres server in
+# data-stack.yml, not a dedicated instance — see that file for why.
 networks:
   public-ingress:
     external: true
@@ -16,48 +17,6 @@ secrets:
     external: true
 
 services:
-  keycloak-db:
-    image: postgres:16-alpine
-    networks:
-      - data-mesh
-    environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD_FILE: /run/secrets/keycloak_db_password
-    secrets:
-      - keycloak_db_password
-    # Tuned down from Postgres defaults to fit the ~250M budget.
-    command:
-      - "postgres"
-      - "-c"
-      - "shared_buffers=64MB"
-      - "-c"
-      - "max_connections=30"
-      - "-c"
-      - "work_mem=4MB"
-      - "-c"
-      - "maintenance_work_mem=32MB"
-    volumes:
-      - /opt/swarm-data/keycloak-db:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-    deploy:
-      mode: replicated
-      replicas: 1
-      resources:
-        limits:
-          memory: 250M
-      restart_policy:
-        condition: any
-        delay: 5s
-      placement:
-        constraints:
-          - node.role == manager
-
   keycloak:
     # Built via images/keycloak/Dockerfile — see that file for why.
     image: local/keycloak:26.0-optimized
@@ -66,7 +25,10 @@ services:
       - app-mesh
       - data-mesh
     environment:
-      KC_DB_URL_HOST: keycloak-db
+      # data_postgres, not just "postgres" — cross-stack service discovery
+      # on a shared external network resolves the full <stack>_<service>
+      # name; there's no compose-style short alias unless deployed together.
+      KC_DB_URL_HOST: data_postgres
       KC_DB_URL_PORT: "5432"
       KC_DB_URL_DATABASE: keycloak
       KC_DB_USERNAME: keycloak
@@ -110,9 +72,10 @@ services:
         limits:
           memory: 750M
       restart_policy:
-        # Swarm ignores depends_on for start order; Keycloak may boot before
-        # keycloak-db is ready, so let it crash-loop with a backoff until the
-        # DB comes up rather than only trying once.
+        # Swarm ignores depends_on for start order, and Keycloak may even
+        # boot before the data stack is deployed at all — let it crash-loop
+        # with a backoff until Postgres is reachable rather than only trying
+        # once.
         condition: on-failure
         delay: 10s
       placement:

@@ -27,16 +27,35 @@ docker swarm init --advertise-addr 10.10.10.202
 ## 3. Create host directories for bind-mounted data
 
 ```bash
-sudo mkdir -p /opt/swarm-data/keycloak-db
-sudo chown "$(whoami)" /opt/swarm-data/keycloak-db
+sudo mkdir -p /opt/swarm-data/postgres
+sudo chown "$(whoami)" /opt/swarm-data/postgres
 ```
 
-## 4. Create secrets
+## 4. Deploy the shared Postgres server
 
-Run these by hand — the values never get typed into a file or committed.
+One Postgres process hosts a separate database + role per service (Keycloak
+first, Gitea/apps later) — see `stacks/data-stack.yml` for why. It needs its
+own superuser secret:
 
 ```bash
-openssl rand -base64 32 | docker secret create keycloak_db_password -
+openssl rand -base64 32 | docker secret create postgres_admin_password -
+docker stack deploy -c stacks/data-stack.yml data
+```
+
+## 5. Provision Keycloak's database
+
+```bash
+./scripts/create-postgres-db.sh keycloak
+```
+
+This creates a `keycloak` role + database on the shared Postgres server
+(convention: role name == database name == service name) and the
+`keycloak_db_password` secret Keycloak's own stack expects. Re-run for any
+future service the same way — it's idempotent.
+
+## 6. Create the remaining secrets
+
+```bash
 openssl rand -base64 32 | docker secret create keycloak_admin_password -
 ```
 
@@ -45,16 +64,15 @@ secrets are immutable — you can't update in place), e.g.
 `keycloak_admin_password_v2`, update the stack file to reference it, then
 `docker stack deploy` again.
 
-**`keycloak_db_password` is a special case**: Postgres only applies
-`POSTGRES_PASSWORD_FILE` once, when it initializes an empty data directory.
-Rotating this secret and redeploying does **not** change the password
-Postgres actually has — Keycloak will get `FATAL: password authentication
-failed for user "keycloak"` because it's now presenting a password Postgres
-was never told about. To rotate it for real, also run `ALTER USER keycloak
-WITH PASSWORD '<new password>';` inside the `keycloak-db` container (`docker
-exec -it <container> psql -U keycloak`) so both sides agree.
+**`keycloak_db_password` is a special case**: rotating it and redeploying
+Keycloak does **not** change the password Postgres actually has for that
+role — Keycloak will get `FATAL: password authentication failed for user
+"keycloak"` because it's presenting a password Postgres was never told
+about. To rotate it for real, also run `ALTER ROLE keycloak WITH PASSWORD
+'<new password>';` inside the `data_postgres` container (`docker exec -it
+<container> psql -U postgres`) so both sides agree.
 
-## 5. Build the optimized Keycloak image
+## 7. Build the optimized Keycloak image
 
 ```bash
 docker build -t local/keycloak:26.0-optimized -f images/keycloak/Dockerfile .
@@ -65,14 +83,14 @@ Keycloak version — check
 [quay.io/repository/keycloak/keycloak?tab=tags](https://quay.io/repository/keycloak/keycloak?tab=tags)
 for the current release before bumping.
 
-## 6. Deploy the stacks
+## 8. Deploy Keycloak and the proxy
 
 ```bash
 docker stack deploy -c stacks/infrastructure-stack.yml infra
 docker stack deploy -c stacks/proxy-stack.yml proxy
 ```
 
-## 7. Force a password reset + MFA enrollment on the admin account
+## 9. Force a password reset + MFA enrollment on the admin account
 
 Run this once, right after the *first* deploy (i.e. while the password you
 put in `keycloak_admin_password` is still the one that actually works):
@@ -86,7 +104,7 @@ password and enrolling TOTP (Google Authenticator or any RFC 6238 app —
 Keycloak's default OTP policy already matches Google Authenticator's
 settings, no changes needed). Safe to re-run.
 
-## 8. Verify
+## 10. Verify
 
 ```bash
 docker service ls
@@ -99,6 +117,14 @@ Then browse to `https://keycloak.suhac.eu` and `https://keycloak.lan.suhac.eu`
 `/admin` with user `suhacb` and the password you put in
 `keycloak_admin_password`. You should immediately be prompted to set a new
 password and scan a QR code to enroll Google Authenticator.
+
+Also confirm plain `http://` requests always redirect to `https://`,
+including hostnames Nginx doesn't otherwise recognize:
+
+```bash
+curl -I http://keycloak.suhac.eu/          # expect 301 -> https://keycloak.suhac.eu/
+curl -I http://anything-else.suhac.eu/     # expect 301 -> https://anything-else.suhac.eu/
+```
 
 ## MFA options (for later realms too)
 

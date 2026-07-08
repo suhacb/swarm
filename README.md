@@ -15,11 +15,12 @@ service configs.
 ├── config/
 │   └── nginx/                 # bind-mounted into the proxy stack
 ├── scripts/
-│   └── bootstrap-keycloak-admin.sh  # forces password reset + TOTP on admin
+│   ├── bootstrap-keycloak-admin.sh  # forces password reset + TOTP on admin
+│   └── create-postgres-db.sh        # provisions a role+db+secret per service
 ├── stacks/
-│   ├── infrastructure-stack.yml  # Keycloak + its Postgres DB
+│   ├── data-stack.yml            # shared Postgres server (+ planned MySQL/phpMyAdmin)
+│   ├── infrastructure-stack.yml  # Keycloak
 │   ├── proxy-stack.yml           # Nginx reverse proxy / TLS termination
-│   ├── data-stack.yml            # (planned) shared Postgres/MySQL/phpMyAdmin
 │   ├── search-stack.yml          # (planned) ZincSearch, Qdrant
 │   └── apps-stack.yml            # (planned) Angular/Vue/Laravel/.NET apps
 └── docs/
@@ -33,6 +34,13 @@ Three encrypted overlay networks, tiered by trust:
 - `public-ingress` — Nginx, Keycloak (needs public reachability for login)
 - `app-mesh` — frontends, backends, Keycloak (token validation)
 - `data-mesh` — backends, Keycloak, all databases (never reaches public-ingress)
+
+## Shared Postgres
+
+One Postgres server (`data-stack.yml`) hosts a separate database + role per
+service — cheaper on 8GB than a dedicated instance each. Convention: role
+name == database name == service name (e.g. `keycloak`). Provision a new
+service with `./scripts/create-postgres-db.sh <service-name>`.
 
 ## Getting started
 
