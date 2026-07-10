@@ -1,0 +1,78 @@
+# Template — copy this to /opt/swarm-data/gitlab/config/gitlab.rb ONCE
+# before the first deploy (see docs/DEPLOY.md). GitLab Omnibus writes other
+# files into that same directory (secrets, SSH host keys) as it runs, so
+# unlike nginx.conf this isn't bind-mounted read-only straight from the
+# repo — editing this file after the fact means editing the copy on disk,
+# not this template, then `gitlab-ctl reconfigure` inside the container.
+
+# One canonical hostname. Unlike Keycloak, GitLab bakes external_url into
+# generated links (clone URLs, notification emails, webhook payloads) —
+# there's no equivalent to KC_HOSTNAME_STRICT=false. gitlab.lan.suhac.eu
+# still works fine for browsing and git clone/push; anything GitLab
+# generates just always shows the public hostname regardless of which one
+# you're actually using.
+external_url 'https://gitlab.suhac.eu'
+
+# TLS terminates at our own Nginx; GitLab's bundled nginx only needs to
+# listen on plain HTTP internally.
+nginx['listen_port'] = 80
+nginx['listen_https'] = false
+# The literal source IP GitLab sees is our proxy container's address on the
+# public-ingress overlay network, which Docker assigns dynamically — trust
+# the whole private range rather than one IP that can change on redeploy.
+gitlab_rails['trusted_proxies'] = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
+
+# --- OIDC login via Keycloak ---
+# issuer uses the SAME public hostname a browser would, resolved internally
+# to our own nginx via the network aliases in proxy-stack.yml — not a
+# Keycloak-internal address — so the issuer/endpoints GitLab's backend
+# discovers exactly match what real login redirects use, and so this call
+# gets real TLS instead of failing to connect on a port Keycloak doesn't
+# directly listen on.
+gitlab_rails['omniauth_enabled'] = true
+gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+gitlab_rails['omniauth_auto_link_user'] = ['openid_connect']
+gitlab_rails['omniauth_block_auto_created_users'] = false
+# Skips GitLab's own sign-in page entirely for unauthenticated visits,
+# going straight to Keycloak — Keycloak is the only identity source once
+# password auth for the web is disabled (see
+# scripts/configure-gitlab-oidc-only.sh). Append ?auto_sign_in=false to
+# the sign-in URL to bypass this for one visit if ever needed, though
+# there's no local account left to log into from the web anyway.
+gitlab_rails['omniauth_auto_sign_in_with_provider'] = 'openid_connect'
+gitlab_rails['omniauth_providers'] = [
+  {
+    name: 'openid_connect',
+    label: 'Keycloak',
+    args: {
+      name: 'openid_connect',
+      scope: ['openid', 'profile', 'email'],
+      response_type: 'code',
+      issuer: 'https://keycloak.suhac.eu/realms/suhacb',
+      discovery: true,
+      uid_field: 'preferred_username',
+      client_options: {
+        identifier: 'gitlab',
+        secret: File.read('/run/secrets/gitlab_oidc_client_secret').strip,
+        redirect_uri: 'https://gitlab.suhac.eu/users/auth/openid_connect/callback'
+      }
+    }
+  }
+]
+
+# Single-logout (making GitLab sign-out also end the Keycloak SSO session)
+# is NOT configured here — "after sign-out path" is a database-backed
+# Application Setting, not a gitlab.rb/Omnibus key (an easy mix-up: it
+# looks exactly like the other settings in this file, but silently does
+# nothing if set here). See scripts/configure-gitlab-sso-logout.sh.
+
+# --- Memory tuning ---
+# This is the dominant memory consumer on the box once running — see
+# docs/DEPLOY.md for real numbers and what else got disabled to get here.
+prometheus_monitoring['enable'] = false
+puma['worker_processes'] = 0
+puma['max_threads'] = 4
+sidekiq['max_concurrency'] = 10
+registry['enable'] = false
+gitlab_pages['enable'] = false
+gitlab_kas['enable'] = false

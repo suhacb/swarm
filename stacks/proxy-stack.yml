@@ -6,7 +6,18 @@ services:
   nginx:
     image: nginx:1.27-alpine
     networks:
-      - public-ingress
+      public-ingress:
+        # Lets any OTHER container on this network (e.g. GitLab, for its
+        # OIDC calls to Keycloak) reach these hostnames directly at nginx,
+        # over real TLS with the real cert, routed exactly like external
+        # traffic — instead of hitting a backend container's internal IP
+        # directly, which would see a different Host and have no TLS at
+        # all. Add a new entry here for every service's public hostname.
+        aliases:
+          - keycloak.suhac.eu
+          - keycloak.lan.suhac.eu
+          - gitlab.suhac.eu
+          - gitlab.lan.suhac.eu
     ports:
       - "80:80"
       - "443:443"
@@ -16,6 +27,7 @@ services:
       # without juggling versioned config objects.
       - /Users/blazsuhac/Documents/projects/swarm/config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - /Users/blazsuhac/Documents/projects/swarm/config/nginx/conf.d:/etc/nginx/conf.d:ro
+      - /Users/blazsuhac/Documents/projects/swarm/config/nginx/snippets:/etc/nginx/snippets:ro
       # NOT /etc/letsencrypt directly: Certbot locks live/ and archive/ down
       # to root:wheel 0700, and Docker Desktop's file-sharing bridge runs as
       # the logged-in user, not root — it can't read those paths at any

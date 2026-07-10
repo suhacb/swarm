@@ -13,13 +13,20 @@ service configs.
 ├── images/
 │   └── keycloak/Dockerfile    # pre-built ("optimized") Keycloak image
 ├── config/
-│   └── nginx/                 # bind-mounted into the proxy stack
+│   ├── nginx/                 # bind-mounted into the proxy stack
+│   └── gitlab/gitlab.rb.template  # copied (not mounted) to /opt/swarm-data/gitlab
 ├── scripts/
-│   ├── bootstrap-keycloak-admin.sh  # forces password reset + TOTP on admin
-│   └── create-postgres-db.sh        # provisions a role+db+secret per service
+│   ├── bootstrap-keycloak-admin.sh    # forces password reset + TOTP on admin
+│   ├── create-postgres-db.sh          # provisions a role+db+secret per service
+│   ├── setup-gitlab-keycloak.sh       # realm/groups/users/MFA/OIDC client for GitLab
+│   ├── bootstrap-gitlab-admin.sh      # promotes a user to GitLab admin
+│   ├── configure-gitlab-sso-logout.sh # GitLab sign-out also ends the Keycloak session
+│   ├── configure-gitlab-oidc-only.sh  # disables local password login for GitLab
+│   └── certbot-deploy-hook.sh         # keeps the readable cert copy in sync
 ├── stacks/
 │   ├── data-stack.yml            # shared Postgres server (+ planned MySQL/phpMyAdmin)
 │   ├── infrastructure-stack.yml  # Keycloak
+│   ├── gitlab-stack.yml          # GitLab CE
 │   ├── proxy-stack.yml           # Nginx reverse proxy / TLS termination
 │   ├── search-stack.yml          # (planned) ZincSearch, Qdrant
 │   └── apps-stack.yml            # (planned) Angular/Vue/Laravel/.NET apps

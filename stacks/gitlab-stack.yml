@@ -1,0 +1,60 @@
+# Real GitLab CE (not Gitea — see issue #2 for why this changed from the
+# original plan). Bundles its own Postgres/Redis internally rather than the
+# shared Postgres server, to avoid GitLab's specific extension/version
+# requirements colliding with what other services expect from it.
+#
+# gitlab.rb itself is NOT bind-mounted from this repo: GitLab writes other
+# files into /etc/gitlab as it runs (secrets, SSH host keys), so the config
+# lives on the persistent host directory instead. See
+# config/gitlab/gitlab.rb.template and docs/DEPLOY.md.
+networks:
+  public-ingress:
+    external: true
+
+secrets:
+  gitlab_root_password:
+    external: true
+  gitlab_oidc_client_secret:
+    external: true
+
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    networks:
+      - public-ingress
+    environment:
+      GITLAB_ROOT_EMAIL: root@suhac.eu
+    secrets:
+      - gitlab_root_password
+      - gitlab_oidc_client_secret
+    # GITLAB_ROOT_PASSWORD only has an effect on the very first reconfigure
+    # of an empty /etc/gitlab — same one-shot bootstrap semantics as
+    # Keycloak's admin env vars. Omnibus doesn't support a *_FILE
+    # convention for it, hence the same wrapper trick used for Keycloak.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >
+        export GITLAB_ROOT_PASSWORD="$$(cat /run/secrets/gitlab_root_password)" &&
+        exec /assets/init-container
+    volumes:
+      - /opt/swarm-data/gitlab/config:/etc/gitlab
+      - /opt/swarm-data/gitlab/logs:/var/log/gitlab
+      - /opt/swarm-data/gitlab/data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/-/liveness"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 4000M
+      restart_policy:
+        condition: on-failure
+        delay: 15s
+      placement:
+        constraints:
+          - node.role == manager
