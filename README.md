@@ -21,7 +21,8 @@ service configs.
 │   ├── setup-gitlab-keycloak.sh       # realm/groups/users/MFA/OIDC client for GitLab
 │   ├── bootstrap-gitlab-admin.sh      # promotes a user to GitLab admin
 │   ├── configure-gitlab-sso-logout.sh # GitLab sign-out also ends the Keycloak session
-│   ├── configure-gitlab-oidc-only.sh  # disables local password login for GitLab
+│   ├── configure-gitlab-oidc-only.sh  # disables local password login + signup for GitLab
+│   ├── harden-gitlab-web-ide.sh       # disables the Web IDE's single-origin fallback
 │   └── certbot-deploy-hook.sh         # keeps the readable cert copy in sync
 ├── stacks/
 │   ├── data-stack.yml            # shared Postgres server (+ planned MySQL/phpMyAdmin)

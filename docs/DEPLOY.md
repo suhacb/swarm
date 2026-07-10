@@ -326,7 +326,9 @@ endpoint (`client_id` + `post_logout_redirect_uri`, no `id_token_hint`
 needed — registered on the client as `post.logout.redirect.uris` by
 `setup-gitlab-keycloak.sh`) before returning to GitLab, so it actually ends
 the SSO session. The second disables local username/password login (both
-web and git-over-HTTP; Personal Access Tokens are unaffected) via
+web and git-over-HTTP; Personal Access Tokens are unaffected) *and* open
+self-registration (GitLab warns about open signup by default anyway, and
+it's pointless once no self-set password can log in) via
 `ApplicationSetting` — **not** a `gitlab.rb` key, an easy mix-up since it
 looks exactly like the settings that are.
 
@@ -339,6 +341,17 @@ HTTP redirect — if you curl `/users/sign_in` expecting a 302 you'll get a
 `root` is not deleted — once password auth is off it's simply unreachable
 from the web, but stays available via `gitlab-rails console`/`runner`
 directly on the server as a break-glass path independent of Keycloak.
+
+Also worth running once, unrelated to auth: GitLab's admin dashboard flags
+"Web IDE single origin fallback" as a high-severity risk by default (it
+serves VS Code assets from GitLab's own origin — defeating the point of
+sandboxing extension code on a separate origin — if that separate domain
+is ever unreachable). Disabling the fallback is GitLab's own recommended
+fix:
+
+```bash
+./scripts/harden-gitlab-web-ide.sh
+```
 
 ### Known limitations
 

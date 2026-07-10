@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Makes Keycloak the only way to log into GitLab: disables local
+# Makes Keycloak the only way to get into or onto GitLab: disables local
 # username/password authentication for both the web UI and git-over-HTTP
 # (Personal Access Tokens are a separate mechanism and are NOT affected —
-# this only turns off literal password-based auth). Both are database-
-# backed Application Settings, not gitlab.rb/Omnibus keys.
+# this only turns off literal password-based auth), and disables open
+# self-registration (GitLab warns about this by default; also pointless
+# once nothing can log in with a self-set password anyway). All three are
+# database-backed Application Settings, not gitlab.rb/Omnibus keys.
 #
 # The built-in `root` account is NOT deleted or blocked — it becomes
 # unreachable from the web (nothing to log into with, once password auth
@@ -26,11 +28,13 @@ fi
 docker exec "$CONTAINER" gitlab-rails runner "
   ApplicationSetting.current.update!(
     password_authentication_enabled_for_web: false,
-    password_authentication_enabled_for_git: false
+    password_authentication_enabled_for_git: false,
+    signup_enabled: false
   )
   s = ApplicationSetting.current
   puts 'password_authentication_enabled_for_web: ' + s.password_authentication_enabled_for_web.to_s
   puts 'password_authentication_enabled_for_git: ' + s.password_authentication_enabled_for_git.to_s
+  puts 'signup_enabled: ' + s.signup_enabled.to_s
 "
 
 echo "Also confirm gitlab_rails['omniauth_auto_sign_in_with_provider'] = 'openid_connect' is set in"
