@@ -353,6 +353,29 @@ fix:
 ./scripts/harden-gitlab-web-ide.sh
 ```
 
+### 7. Importing existing projects
+
+A fresh instance ships with **no** project import sources enabled at all
+("No import options available" in New project → Import project until this
+runs):
+
+```bash
+./scripts/enable-gitlab-import-sources.sh github
+```
+
+Valid sources: `github`, `bitbucket`, `bitbucket_server`, `fogbugz`, `git`
+(generic git URL), `gitlab_project` (GitLab export file), `gitea`,
+`manifest`. Merges into whatever's already enabled rather than replacing
+it, so re-running to add another source later doesn't disable this one.
+
+For GitHub specifically: New project → Import project → GitHub, paste a
+GitHub Personal Access Token (classic, `repo` scope), pick the repo. Pulls
+branches/commits/tags plus issues, PRs (as merge requests), comments,
+labels, and milestones in one pass — a real git-level mirror would only
+get the git data, not the GitHub-specific metadata. GitHub usernames only
+map to GitLab accounts that already exist with a matching identity, so
+expect most historical authorship to just show as whoever ran the import.
+
 ### Known limitations
 
 - **One hostname in generated links**: unlike Keycloak, GitLab bakes
