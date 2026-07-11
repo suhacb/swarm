@@ -405,6 +405,35 @@ for protecting GitLab's tight memory budget from being hammered by
 scanner/bot traffic. Verified live by actually flooding both endpoints and
 confirming `503`s appear, not just checked for valid syntax.
 
+A few more, applied directly (no script — small, one-off ApplicationSetting/
+realm changes):
+
+- **GitLab Admin Mode** (`admin_mode: true`) — the Admin Area now requires
+  re-authentication even if already logged in, protecting against session
+  hijacking or an unlocked laptop. Was off by default.
+- **GitLab system hooks** can no longer reach the local network
+  (`allow_local_requests_from_system_hooks: false`) — unused feature, no
+  reason to leave it able to. Webhook SSRF protection
+  (`allow_local_requests_from_web_hooks_and_services`) was already off by
+  default; nothing to do there.
+- **Keycloak password policy** — `length(12) and notUsername and notEmail`
+  on both realms. MFA already covers most of the real risk here, but there
+  was no policy at all before, so a self-set one-character password was
+  technically possible.
+- **Nginx TLS ciphers** — Mozilla's "Intermediate" cipher list for TLS 1.2
+  (TLS 1.3 always uses its own strong, fixed suite regardless). Verified
+  live: forcing `-tls1_2` negotiates a cipher straight from the configured
+  list, not just whatever OpenSSL happened to default to.
+- **Keycloak admin console + Admin REST API, LAN-only** (`location /admin`
+  in `keycloak.conf`) — blocked entirely unless accessed via
+  `keycloak.lan.suhac.eu`. Real users only ever need `/realms/*` (login,
+  OIDC); this repo's own automation scripts talk to Keycloak directly
+  inside the container (`docker exec`), never through this proxy, so
+  they're unaffected. This was a judgment call the user made explicitly —
+  the tradeoff is losing admin console access from outside the LAN
+  entirely (no VPN currently), in exchange for meaningfully shrinking the
+  attack surface of the most sensitive interface on the box.
+
 ### Known limitations
 
 - **One hostname in generated links**: unlike Keycloak, GitLab bakes
