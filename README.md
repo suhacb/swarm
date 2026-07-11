@@ -24,6 +24,7 @@ service configs.
 │   ├── configure-gitlab-oidc-only.sh  # disables local password login + signup for GitLab
 │   ├── harden-gitlab-web-ide.sh       # disables the Web IDE's single-origin fallback
 │   ├── enable-gitlab-import-sources.sh # enables project import sources (none on by default)
+│   ├── harden-keycloak-brute-force.sh # enables lockout on login failures (off by default)
 │   └── certbot-deploy-hook.sh         # keeps the readable cert copy in sync
 ├── stacks/
 │   ├── data-stack.yml            # shared Postgres server (+ planned MySQL/phpMyAdmin)

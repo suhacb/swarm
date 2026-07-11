@@ -376,6 +376,35 @@ get the git data, not the GitHub-specific metadata. GitHub usernames only
 map to GitLab accounts that already exist with a matching identity, so
 expect most historical authorship to just show as whoever ran the import.
 
+### 8. Perimeter hardening
+
+Once the box is genuinely internet-facing, it starts getting hit by normal
+background scanning/crawling within hours — none of this is a response to
+an actual incident, just baseline hardening for that reality. Real
+firewall/network-level protection is out of scope here by design (handled
+upstream, on the router).
+
+```bash
+./scripts/harden-keycloak-brute-force.sh master suhacb
+```
+
+Both realms shipped with `bruteForceProtected` **off**. Enables it with
+`failureFactor=5` (Keycloak's own default is 30) — since MFA is already
+required realm-wide, this only protects the password step, and 5 failed
+attempts is enough margin for a real user who knows their own password.
+Temporary lockout, not permanent (`permanentLockout=false`), so a
+legitimate lockout self-resolves rather than needing admin intervention.
+Re-run for any future realm.
+
+Nginx also gets two rate-limit zones (`config/nginx/nginx.conf`): `general`
+(10r/s, burst 20) applied to every vhost, and a tighter `auth` zone (2r/s,
+burst 5) applied specifically to Keycloak's login form submission
+(`/realms/*/login-actions/authenticate`) as defense in depth alongside the
+brute-force lockout above. The general zone matters less for security than
+for protecting GitLab's tight memory budget from being hammered by
+scanner/bot traffic. Verified live by actually flooding both endpoints and
+confirming `503`s appear, not just checked for valid syntax.
+
 ### Known limitations
 
 - **One hostname in generated links**: unlike Keycloak, GitLab bakes
