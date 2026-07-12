@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Bootstraps Garage for the princess service: creates the 4 environment
-# buckets and ONE access key scoped to exactly those 4 (mirrors the
-# princess Postgres role's "scoped to only those 4 databases" pattern —
-# see create-princess-databases.sh). Layout itself is handled by the
-# `--single-node` server flag (shared-services-stack.yml), not this script.
+# Bootstraps Garage for the princess service: creates the 4 per-environment
+# buckets plus one shared cross-environment bucket (princess-templates —
+# per the princess_backend repo's own .env.example/.testing.env.example,
+# both reference the SAME literal bucket name regardless of environment,
+# unlike the per-env buckets below), and ONE access key scoped to exactly
+# those 5 (mirrors the princess Postgres role's "scoped to only those 4
+# databases" pattern — see create-princess-databases.sh). Layout itself is
+# handled by the `--single-node` server flag (shared-services-stack.yml),
+# not this script.
 #
 # Usage: ./scripts/setup-garage.sh
 # Idempotent: skips any bucket/key that already exists.
@@ -14,7 +18,7 @@ set -euo pipefail
 # a Garage/S3-only exception to the repo-wide underscore convention used
 # for Postgres databases and Qdrant/ZincSearch naming, neither of which
 # has this restriction.
-BUCKETS=(princess staging-princess e2e-princess test-princess)
+BUCKETS=(princess staging-princess e2e-princess test-princess princess-templates)
 KEY_NAME="princess"
 
 CONTAINER=$(docker ps --filter "label=com.docker.swarm.service.name=shared-services_garage" --format '{{.ID}}' | head -1)
