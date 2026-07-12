@@ -28,4 +28,11 @@ OAUTH2_CONFIG = [{
     'OAUTH2_USERINFO_ENDPOINT': 'https://keycloak.suhac.eu/realms/suhacb/protocol/openid-connect/userinfo',
     'OAUTH2_SERVER_METADATA_URL': 'https://keycloak.suhac.eu/realms/suhacb/.well-known/openid-configuration',
     'OAUTH2_SCOPE': 'openid email profile',
+    # Second gate on top of the pre-provisioned-username check (see
+    # setup.py add-external-user in DEPLOY.md): __is_any_claim_valid in
+    # pgAdmin's own oauth2.py (confirmed live by reading its source)
+    # requires the token's "groups" claim to contain this value — added
+    # via the groups mapper scripts/setup-infra-tools-keycloak.sh attaches
+    # to this client.
+    'OAUTH2_ADDITIONAL_CLAIMS': {'groups': ['pgadmin-admins']},
 }]

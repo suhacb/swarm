@@ -15,8 +15,10 @@ service configs.
 ├── config/
 │   ├── nginx/                 # bind-mounted into the proxy stack
 │   ├── gitlab/gitlab.rb.template  # copied (not mounted) to /opt/swarm-data/gitlab
-│   ├── garage/garage.toml.template   # bind-mounted, secrets rendered in at container start
-│   ├── pgadmin/config_local.py.template # same rendering pattern, for pgAdmin's OAuth2 config
+│   ├── garage/garage.toml.template   # copied ONCE to /opt/swarm-data/garage/garage.toml
+│   │                                 # (real secrets baked in, host-only — Garage's image
+│   │                                 # has no shell to do runtime substitution itself)
+│   ├── pgadmin/config_local.py.template # bind-mounted, secret rendered in at container start
 │   └── princess/test-users.csv    # gitignored — 11 princess-test realm test users, never committed
 ├── scripts/
 │   ├── bootstrap-keycloak-admin.sh    # forces password reset + TOTP on admin
@@ -25,6 +27,7 @@ service configs.
 │   ├── setup-gitlab-keycloak.sh       # realm/groups/users/MFA/OIDC client for GitLab
 │   ├── setup-princess-keycloak.sh     # suhacb realm additions + new princess-test realm
 │   ├── setup-pgadmin-keycloak.sh      # OIDC client for pgAdmin, in the suhacb realm
+│   ├── setup-infra-tools-keycloak.sh  # oauth2-proxy client + per-tool groups/users
 │   ├── setup-garage.sh                # bucket + scoped-key bootstrap for princess
 │   ├── bootstrap-gitlab-admin.sh      # promotes a user to GitLab admin
 │   ├── configure-gitlab-sso-logout.sh # GitLab sign-out also ends the Keycloak session
@@ -39,7 +42,7 @@ service configs.
 │   ├── gitlab-stack.yml          # GitLab CE (+ bundled Container Registry)
 │   ├── gitlab-runner-stack.yml   # GitLab Runner, Docker executor
 │   ├── proxy-stack.yml           # Nginx reverse proxy / TLS termination
-│   ├── shared-services-stack.yml # Qdrant, ZincSearch, Garage
+│   ├── shared-services-stack.yml # Qdrant, ZincSearch, Garage (+ garage-webui, oauth2-proxy)
 │   └── apps-stack.yml            # princess frontend/backend, prod + staging
 └── docs/
     └── DEPLOY.md               # step-by-step deploy runbook
@@ -49,7 +52,9 @@ service configs.
 
 Encrypted overlay networks, tiered by trust:
 
-- `public-ingress` — Nginx, Keycloak (needs public reachability for login)
+- `public-ingress` — Nginx, Keycloak (needs public reachability for login),
+  Qdrant/ZincSearch/garage-webui/oauth2-proxy (their admin UIs are public
+  hostnames too, but gated — see "Admin UI access" below, not left open)
 - `app-mesh` — frontends, backends, Keycloak (token validation)
 - `data-mesh` — backends, Keycloak, all databases (never reaches public-ingress)
 - `ci-mesh` — the one attachable exception: GitLab Runner's Docker executor
@@ -76,6 +81,20 @@ bucket-naming rules, which reject underscores), underscored everywhere else
 indices). Only Garage enforces this server-side (via scoped access keys, see
 `scripts/setup-garage.sh`); Qdrant/ZincSearch naming is up to the consuming
 app's own config.
+
+## Admin UI access (pgAdmin, Qdrant, ZincSearch, Garage)
+
+All four gated behind Keycloak SSO (`suhacb` realm), one dedicated
+non-obvious-username account + one dedicated group per tool
+(`pgadmin-admins`/`qdrant-admins`/`zinc-admins`/`garage-admins`) —
+deliberately not one shared group, so a compromised credential for one
+tool doesn't expose the other three. pgAdmin has native OIDC support and
+gates itself directly; the other three don't, so a single shared
+`oauth2-proxy` instance sits in front of them, with each Nginx vhost
+enforcing its own required group via oauth2-proxy's per-request
+`allowed_groups` mechanism (see `config/nginx/conf.d/infra-tools.conf`'s
+header comment for two real nginx dead ends hit getting this right, and
+`scripts/setup-infra-tools-keycloak.sh` for the Keycloak side).
 
 ## Getting started
 
