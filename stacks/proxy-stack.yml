@@ -17,9 +17,7 @@ services:
         # all. Add a new entry here for every service's public hostname.
         aliases:
           - keycloak.suhac.eu
-          - keycloak.lan.suhac.eu
           - gitlab.suhac.eu
-          - gitlab.lan.suhac.eu
       ci-mesh:
         # Same alias trick, extended to CI job containers: GitLab Runner's
         # Docker executor creates job containers as plain `docker run`
@@ -34,8 +32,21 @@ services:
           - gitlab.suhac.eu
           - registry.suhac.eu
     ports:
-      - "80:80"
-      - "443:443"
+      # mode: host bypasses Swarm's routing-mesh SNAT — without it, every
+      # connection nginx sees is rewritten to a generic overlay-network
+      # address (confirmed live: a request from this very host showed up
+      # as 10.0.0.2), making $remote_addr useless for both the LAN-only
+      # admin-console gate below and per-client rate limiting. No downside
+      # on a single-node Swarm — the routing mesh only matters for
+      # balancing across multiple nodes.
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
     volumes:
       # Bind-mounted (not Swarm configs) so editing files under config/nginx/
       # on the repo checkout takes effect on `docker service update --force`

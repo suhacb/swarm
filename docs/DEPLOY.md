@@ -143,8 +143,7 @@ docker service logs -f infra_keycloak
 docker service logs -f proxy_nginx
 ```
 
-Then browse to `https://keycloak.suhac.eu` and `https://keycloak.lan.suhac.eu`
-— both should hit the same Keycloak instance. Log in to the admin console at
+Then browse to `https://keycloak.suhac.eu`. Log in to the admin console at
 `/admin` with user `suhacb` and the password you put in
 `keycloak_admin_password`. You should immediately be prompted to set a new
 password and scan a QR code to enroll Google Authenticator.
@@ -189,9 +188,8 @@ once per realm instead of once per user.
 ## Phase 2: GitLab with Keycloak SSO
 
 Real GitLab CE (not Gitea — revisited from the original plan; see issue #2).
-Reachable at `gitlab.suhac.eu` / `gitlab.lan.suhac.eu`. This is the dominant
-memory consumer on the box once running — see the numbers at the end of this
-section.
+Reachable at `gitlab.suhac.eu`. This is the dominant memory consumer on the
+box once running — see the numbers at the end of this section.
 
 ### 1. Bootstrap a Keycloak automation client (one-time, manual)
 
@@ -203,7 +201,8 @@ password — this has to be created once through the Admin Console (browser
 handles MFA fine; `kcadm` direct-grant doesn't), since creating it via
 `kcadm` would itself need an already-authenticated session.
 
-1. Log into `https://keycloak.lan.suhac.eu/admin`, **master** realm.
+1. Log into `https://keycloak.suhac.eu/admin` (from the LAN — see the
+   perimeter hardening section below), **master** realm.
 2. **Clients → Create client**. OpenID Connect, Client ID: `automation-cli`. Next.
 3. Turn **on** "Client authentication" and "Service accounts roles"; turn
    **off** "Standard flow" and "Direct access grants". Save.
@@ -424,43 +423,37 @@ realm changes):
   (TLS 1.3 always uses its own strong, fixed suite regardless). Verified
   live: forcing `-tls1_2` negotiates a cipher straight from the configured
   list, not just whatever OpenSSL happened to default to.
-- **Keycloak admin console + Admin REST API, LAN-only** (`location /admin`
-  in `keycloak.conf`) — blocked entirely unless accessed via
-  `keycloak.lan.suhac.eu`. Real users only ever need `/realms/*` (login,
-  OIDC); this repo's own automation scripts talk to Keycloak directly
-  inside the container (`docker exec`), never through this proxy, so
-  they're unaffected. This was a judgment call the user made explicitly —
-  the tradeoff is losing admin console access from outside the LAN
-  entirely (no VPN currently), in exchange for meaningfully shrinking the
-  attack surface of the most sensitive interface on the box.
+- **Keycloak admin console LAN-only restriction was tried and dropped.** It
+  originally worked by gating on a second hostname (`keycloak.lan.suhac.eu`)
+  — removed along with that hostname (see "Single hostname" below). The
+  replacement attempt, source-IP filtering (`allow 10.10.10.0/24; deny
+  all;`), turned out to be impossible on Docker Desktop for Mac: confirmed
+  live that Docker Desktop's own VM-boundary NAT rewrites *every* client's
+  source IP to its internal gateway address before any container sees it —
+  LAN, WAN, and even the host machine's own requests all become
+  indistinguishable — regardless of Swarm's publish mode. `/admin` is
+  reachable from `keycloak.suhac.eu` from anywhere now; MFA, the password
+  policy, and brute-force lockout are the real protections left on it. A
+  real fix (VPN, or a router-level firewall rule ahead of the Mac Mini
+  entirely) is a separate, bigger undertaking if this needs revisiting.
 
 ### Known limitations
 
-- **One hostname in generated links**: unlike Keycloak, GitLab bakes
-  `external_url` into clone URLs, notification emails, and webhook payloads
-  — there's no per-request dynamic hostname. `gitlab.lan.suhac.eu` still
-  works fine for browsing and git clone/push either way; anything GitLab
-  itself generates will just always show `gitlab.suhac.eu` regardless of
-  which hostname you're actually using.
 - **Bundled Postgres/Redis**: GitLab uses its own internal database, not the
   shared `data_postgres` server, to avoid GitLab's specific extension/version
   requirements colliding with what other services expect from that instance.
-- **OIDC redirect_uri always targets the public hostname**: because of the
-  first limitation above, the browser-facing redirect back from Keycloak
-  after login always goes to `gitlab.suhac.eu`'s callback, even if you
-  started at `gitlab.lan.suhac.eu`. This previously hung partway through
-  login from inside the LAN — `dig` resolving the hostname correctly wasn't
-  sufficient proof it'd work, since browsers increasingly default to their
-  own DNS-over-HTTPS resolver (Cloudflare, Google), bypassing router-local
-  DNS overrides entirely and getting the real public IP instead. Resolved by
-  adding an explicit Local DNS Record override on the router (UDR7) for
-  `gitlab.suhac.eu` → the box's LAN IP, the same fix already in place for
-  `keycloak.suhac.eu`, so both hostnames now behave identically from inside
-  the LAN regardless of which resolver answers. **Under reconsideration**:
-  the `.lan.suhac.eu` hostnames may be dropped entirely — with the router
-  override in place, the public hostname already works fine from the LAN, so
-  the second hostname isn't adding real value, just extra surface area in
-  redirects/env vars/configs to keep in sync.
+- **Single hostname, no `.lan` variant**: `gitlab.suhac.eu` and
+  `keycloak.suhac.eu` are the only hostnames — no `.lan.suhac.eu` duality.
+  There used to be one: a second hostname existed specifically so a router
+  DNS override could point it at the box's LAN IP, working around real
+  browsers increasingly defaulting to their own DNS-over-HTTPS resolver
+  (Cloudflare, Google) for the public hostname, bypassing router-local DNS
+  overrides and hitting a NAT hairpin from inside the LAN. In practice the
+  second hostname just added confusion (which one do you use where) without
+  adding capability — a Local DNS Record override on the router (UDR7) for
+  the **same** public hostname → the box's LAN IP achieves the identical
+  outcome with one name instead of two. If you're setting this up fresh and
+  hit the hairpin/DoH issue, that's the fix — not a second hostname.
 
 ## Phase 2b: CI/CD — GitLab Runner + Container Registry
 
@@ -480,9 +473,11 @@ deployment, apply it the same way any other `gitlab.rb` change is applied —
 edit `/opt/swarm-data/gitlab/config/gitlab.rb` directly, then
 `gitlab-ctl reconfigure` inside the container.
 
-`registry.suhac.eu` / `registry.lan.suhac.eu` need no new DNS or cert work —
-both are one level deep, already covered by the existing wildcard record and
-cert.
+`registry.suhac.eu` needs no new DNS or cert work — one level deep, already
+covered by the existing wildcard record and cert. If it's unreachable from
+inside the LAN, add the same router Local DNS Record override already used
+for `gitlab.suhac.eu`/`keycloak.suhac.eu` (see the "Single hostname" note
+above) rather than a separate `.lan` hostname.
 
 ### 2. Deploy the registry's Nginx vhost and `ci-mesh`
 
@@ -553,6 +548,23 @@ build:
 
 ### Known limitations
 
+- **Nginx's ports publish in `mode: host`, not Swarm's default routing
+  mesh** — bypasses one real layer of IP-masking (Swarm's ingress mode SNATs
+  every connection to a generic overlay address; verified live, a request
+  from the host itself showed up in nginx's logs as `10.0.0.2`). No downside
+  on a single-node Swarm (the mesh only matters for balancing across nodes),
+  so left in place even though it turned out not to be sufficient on its
+  own — see the next point.
+- **Per-client rate limiting (`limit_req_zone $binary_remote_addr ...`) is
+  not actually per-client on this Docker Desktop for Mac setup.** `mode:
+  host` above fixes Swarm's own SNAT, but Docker Desktop for Mac has a
+  second, deeper NAT layer at the macOS-host/Linux-VM boundary that rewrites
+  *every* client's source IP to its internal gateway address (confirmed
+  live while investigating a LAN-only admin-console restriction — see
+  Phase 2's "Known limitations"). Nothing in this stack can bypass that
+  layer; on a real Linux host (no Docker Desktop VM in between) this
+  wouldn't be an issue and `mode: host` alone would be sufficient. Until
+  then, rate limiting still blunts aggregate flooding, just not per-visitor.
 - **Sidekiq can silently wedge under this Docker Desktop setup**: seen twice
   — once after a `gitlab-ctl reconfigure` restarted Sidekiq but its paired
   log/rotation process didn't cleanly restart alongside it (fixed with

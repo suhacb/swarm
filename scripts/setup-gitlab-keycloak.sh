@@ -142,9 +142,7 @@ else
     -s protocol=openid-connect \
     -s publicClient=false \
     -s standardFlowEnabled=true \
-    -s directAccessGrantsEnabled=false \
-    -s 'redirectUris=["https://gitlab.suhac.eu/users/auth/openid_connect/callback","https://gitlab.lan.suhac.eu/users/auth/openid_connect/callback"]' \
-    -s 'webOrigins=["https://gitlab.suhac.eu","https://gitlab.lan.suhac.eu"]')
+    -s directAccessGrantsEnabled=false)
 
   # Exposes group membership (gitlab-admins/gitlab-users) as a "groups"
   # claim — GitLab CE doesn't reliably auto-promote admins from this (that's
@@ -165,14 +163,19 @@ else
   echo "Created client '$CLIENT_ID' and secret 'gitlab_oidc_client_secret'."
 fi
 
+# Always enforced (not just at creation) so re-running this script fixes
+# an existing client too — e.g. dropping a hostname requires updating this
+# regardless of whether the client already existed.
+kcadm update "clients/$CLIENT_UUID" -r "$REALM" \
+  -s 'redirectUris=["https://gitlab.suhac.eu/users/auth/openid_connect/callback"]' \
+  -s 'webOrigins=["https://gitlab.suhac.eu"]'
+
 # Lets Keycloak's logout endpoint accept client_id + post_logout_redirect_uri
 # without needing an id_token_hint — used by gitlab.rb's after_sign_out_path
 # to make GitLab's sign-out also end the Keycloak SSO session, instead of
 # leaving it alive so the next "sign in with Keycloak" silently
-# re-authenticates as whoever was last logged in without asking. Idempotent
-# to re-apply, so this runs whether the client was just created or already
-# existed.
+# re-authenticates as whoever was last logged in without asking.
 kcadm update "clients/$CLIENT_UUID" -r "$REALM" \
-  -s 'attributes."post.logout.redirect.uris"="https://gitlab.suhac.eu/users/sign_in##https://gitlab.lan.suhac.eu/users/sign_in"'
+  -s 'attributes."post.logout.redirect.uris"="https://gitlab.suhac.eu/users/sign_in"'
 
 echo "Done."

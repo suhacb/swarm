@@ -7,10 +7,7 @@
 
 # One canonical hostname. Unlike Keycloak, GitLab bakes external_url into
 # generated links (clone URLs, notification emails, webhook payloads) —
-# there's no equivalent to KC_HOSTNAME_STRICT=false. gitlab.lan.suhac.eu
-# still works fine for browsing and git clone/push; anything GitLab
-# generates just always shows the public hostname regardless of which one
-# you're actually using.
+# there's no equivalent to KC_HOSTNAME_STRICT=false.
 external_url 'https://gitlab.suhac.eu'
 
 # TLS terminates at our own Nginx; GitLab's bundled nginx only needs to
