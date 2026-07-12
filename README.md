@@ -9,7 +9,7 @@ service configs.
 
 ```
 ├── networks/
-│   └── deploy-networks.sh     # creates the 3 encrypted overlay networks
+│   └── deploy-networks.sh     # creates the encrypted overlay networks
 ├── images/
 │   └── keycloak/Dockerfile    # pre-built ("optimized") Keycloak image
 ├── config/
@@ -29,7 +29,8 @@ service configs.
 ├── stacks/
 │   ├── data-stack.yml            # shared Postgres server (+ planned MySQL/phpMyAdmin)
 │   ├── infrastructure-stack.yml  # Keycloak
-│   ├── gitlab-stack.yml          # GitLab CE
+│   ├── gitlab-stack.yml          # GitLab CE (+ bundled Container Registry)
+│   ├── gitlab-runner-stack.yml   # GitLab Runner, Docker executor
 │   ├── proxy-stack.yml           # Nginx reverse proxy / TLS termination
 │   ├── search-stack.yml          # (planned) ZincSearch, Qdrant
 │   └── apps-stack.yml            # (planned) Angular/Vue/Laravel/.NET apps
@@ -39,11 +40,14 @@ service configs.
 
 ## Network tiers
 
-Three encrypted overlay networks, tiered by trust:
+Encrypted overlay networks, tiered by trust:
 
 - `public-ingress` — Nginx, Keycloak (needs public reachability for login)
 - `app-mesh` — frontends, backends, Keycloak (token validation)
 - `data-mesh` — backends, Keycloak, all databases (never reaches public-ingress)
+- `ci-mesh` — the one attachable exception: GitLab Runner's Docker executor
+  creates job containers via plain `docker run`, not Swarm services, so they
+  can only join a network that allows that
 
 ## Shared Postgres
 

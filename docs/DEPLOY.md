@@ -448,12 +448,124 @@ realm changes):
 - **OIDC redirect_uri always targets the public hostname**: because of the
   first limitation above, the browser-facing redirect back from Keycloak
   after login always goes to `gitlab.suhac.eu`'s callback, even if you
-  started at `gitlab.lan.suhac.eu`. If the public hostname isn't reachable
-  from inside your LAN, this hangs partway through login. `dig` resolving
-  it correctly isn't sufficient proof it'll work — browsers increasingly
-  default to their own DNS-over-HTTPS resolver (Cloudflare, Google),
-  bypassing router-local DNS overrides entirely and getting the real public
-  IP instead. A genuine NAT hairpin/loopback fix on the router is more
-  robust than a DNS override for this reason — it works regardless of which
-  resolver answered. As of this writing this is still being tracked down;
-  see issue #2.
+  started at `gitlab.lan.suhac.eu`. This previously hung partway through
+  login from inside the LAN — `dig` resolving the hostname correctly wasn't
+  sufficient proof it'd work, since browsers increasingly default to their
+  own DNS-over-HTTPS resolver (Cloudflare, Google), bypassing router-local
+  DNS overrides entirely and getting the real public IP instead. Resolved by
+  adding an explicit Local DNS Record override on the router (UDR7) for
+  `gitlab.suhac.eu` → the box's LAN IP, the same fix already in place for
+  `keycloak.suhac.eu`, so both hostnames now behave identically from inside
+  the LAN regardless of which resolver answers. **Under reconsideration**:
+  the `.lan.suhac.eu` hostnames may be dropped entirely — with the router
+  override in place, the public hostname already works fine from the LAN, so
+  the second hostname isn't adding real value, just extra surface area in
+  redirects/env vars/configs to keep in sync.
+
+## Phase 2b: CI/CD — GitLab Runner + Container Registry
+
+GitLab Runner (Docker executor) plus GitLab's bundled Container Registry, for
+MR pipelines and "build once, promote many" image deploys. The runner manager
+itself has no persistent footprint beyond its config — every job runs in its
+own ephemeral sibling container, created via the host's Docker socket (not
+Docker-in-Docker), removed once the job finishes.
+
+### 1. Container Registry
+
+Already enabled in `config/gitlab/gitlab.rb.template` (`registry['enable']`,
+`registry_external_url 'https://registry.suhac.eu'`, `registry_nginx[...]`
+mirroring the same "our own Nginx terminates TLS, Omnibus's internal nginx
+only speaks plain HTTP" pattern as the main GitLab vhost). For an existing
+deployment, apply it the same way any other `gitlab.rb` change is applied —
+edit `/opt/swarm-data/gitlab/config/gitlab.rb` directly, then
+`gitlab-ctl reconfigure` inside the container.
+
+`registry.suhac.eu` / `registry.lan.suhac.eu` need no new DNS or cert work —
+both are one level deep, already covered by the existing wildcard record and
+cert.
+
+### 2. Deploy the registry's Nginx vhost and `ci-mesh`
+
+```bash
+docker stack deploy -c stacks/proxy-stack.yml proxy
+```
+
+Picks up `config/nginx/conf.d/registry.conf` (new vhost) and the `ci-mesh`
+network membership on `nginx` (aliases `gitlab.suhac.eu` and
+`registry.suhac.eu`) — the same alias trick already used for
+`public-ingress`, extended so CI job containers (which only ever join
+`ci-mesh`, never `public-ingress`) can still reach both over real TLS.
+GitLab and the registry itself don't need to join `ci-mesh` for this — Nginx
+already resolves `gitlab:80`/`gitlab:5050` via its own `public-ingress`
+membership regardless of which network the inbound request arrived on.
+
+### 3. Get a runner authentication token
+
+Admin Area → CI/CD → Runners → **New instance runner**. Pick tags (e.g.
+`docker`, `swarm-homelab`) and whether to run untagged jobs, then copy the
+`glrt-…` authentication token shown (this is the new token-based flow —
+GitLab 19.x removed the old shared registration token entirely).
+
+```bash
+sudo mkdir -p /opt/swarm-data/gitlab-runner/config
+sudo chown -R "$(whoami)" /opt/swarm-data/gitlab-runner
+printf '%s' '<the glrt-... token>' | docker secret create gitlab_runner_token -
+```
+
+### 4. Deploy the runner
+
+```bash
+docker stack deploy -c stacks/gitlab-runner-stack.yml gitlab-runner
+```
+
+First start runs `gitlab-runner register` once (idempotent — skipped on
+every later restart once `config.toml` exists on the bind-mounted config
+dir) using the token secret, Docker executor, `docker:24-cli` as the default
+job image, `network_mode=ci-mesh`, and the host's Docker socket mounted into
+job containers too (so a job's own `docker build`/`docker push` steps talk
+to the same host daemon). `concurrent = 1` matches the tight RAM budget —
+one job at a time.
+
+### 5. Verify
+
+```bash
+docker service logs -f gitlab-runner_gitlab-runner
+```
+
+Should show `Runner registered successfully` then start polling for jobs.
+Confirm in the UI (Admin Area → CI/CD → Runners) that it shows **online**,
+or via `gitlab-rails runner "puts Ci::Runner.find(1).online?"` inside the
+GitLab container.
+
+A minimal `.gitlab-ci.yml` smoke test that actually exercises the full
+path — clone, Docker executor, build, registry auth, push:
+
+```yaml
+build:
+  stage: build
+  image: docker:24-cli
+  tags: [docker]
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+```
+
+### Known limitations
+
+- **Sidekiq can silently wedge under this Docker Desktop setup**: seen twice
+  — once after a `gitlab-ctl reconfigure` restarted Sidekiq but its paired
+  log/rotation process didn't cleanly restart alongside it (fixed with
+  `kill -9` on the stuck log process to force runit to respawn it cleanly);
+  once as a live 500 on a real project caused by the same underlying
+  `application_json.log` file transiently disappearing out from under an
+  open file handle (self-resolved when Docker's own healthcheck killed and
+  Swarm auto-restarted the container). Root cause looks like Docker
+  Desktop's virtiofs bind-mount layer occasionally hiccupping on fresh file
+  opens under this bind-mounted logs directory specifically — the same class
+  of issue as the certs-mount fix in step 3.5, not something fixable from
+  inside the container. If GitLab seems wedged (Sidekiq queue not draining,
+  random 500s) with `gitlab-ctl status` still showing everything "run:",
+  check `Sidekiq::ProcessSet.new.size` via `gitlab-rails runner` — `0` means
+  it's lost its Redis heartbeat despite the process being alive, and a full
+  Docker Desktop restart is the most reliable fix found so far.
