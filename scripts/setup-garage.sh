@@ -71,4 +71,19 @@ for BUCKET in "${BUCKETS[@]}"; do
   fi
 done
 
+# princess_backend's own test suite dynamically provisions buckets per
+# run (PHPUnit/Playwright, under GARAGE_S3_BUCKET_PREFIX) rather than
+# using only the fixed set above — confirmed with the user this is
+# intentional, not a mismatch to fix on their end. Buckets the key
+# creates itself are automatically owned by it, same as S3's own
+# CreateBucket semantics; this loosens the "scoped to exactly N buckets"
+# property the fixed grants above have, but the key is still
+# princess-only, not shared with any other tenant.
+if garage key info "$KEY_NAME" | grep -q "Can create buckets:  true"; then
+  echo "Key '$KEY_NAME' can already create buckets."
+else
+  garage key allow --create-bucket "$KEY_NAME"
+  echo "Granted '$KEY_NAME' bucket-creation capability."
+fi
+
 echo "Done."
