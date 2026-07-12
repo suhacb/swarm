@@ -214,11 +214,18 @@ services:
       # header this flag causes oauth2-proxy to return — see
       # config/nginx/conf.d/infra-tools.conf.
       #
-      # One shared cookie across all three hostnames for convenience (log
-      # in once) — authorization is still enforced independently per
-      # vhost regardless, so sharing the session doesn't share access.
-      OAUTH2_PROXY_COOKIE_DOMAINS: ".suhac.eu"
-      OAUTH2_PROXY_WHITELIST_DOMAINS: ".suhac.eu"
+      # Deliberately NOT setting OAUTH2_PROXY_COOKIE_DOMAINS: originally
+      # shared across all three hostnames for convenience (log in once),
+      # but that turned out to be actively counterproductive here —
+      # confirmed live: with three DIFFERENT dedicated accounts meant for
+      # three DIFFERENT tools, a shared cookie means whichever account
+      # authenticates first silently sticks for its whole 168h lifetime
+      # across all three, and killing the Keycloak SSO session does NOT
+      # clear it either (it's oauth2-proxy's own separate cookie/session,
+      # confirmed by testing — only /oauth2/sign_out does). Leaving this
+      # unset makes oauth2-proxy default to a cookie scoped to the exact
+      # request host, so each tool always gets its own independent
+      # session tied to its own dedicated account, no bleed-through.
       # --reverse-proxy trusts X-Forwarded-* headers from ANY IP by
       # default (confirmed live — oauth2-proxy warns about this on
       # startup) — only Nginx should ever be able to set those. Scoped to
