@@ -15,6 +15,8 @@ secrets:
     external: true
   keycloak_admin_password:
     external: true
+  keycloak_automation_client_secret:
+    external: true
 
 services:
   keycloak:
@@ -50,6 +52,12 @@ services:
     secrets:
       - keycloak_db_password
       - keycloak_admin_password
+      # Not consumed by Keycloak itself — just mounted here so
+      # scripts/*.sh can `docker exec` in and read it to authenticate
+      # kcadm.sh via the automation-cli service account instead of a human
+      # admin's password (which now requires a live TOTP code kcadm can't
+      # supply, since it's created interactively via an authenticator app).
+      - keycloak_automation_client_secret
     entrypoint: ["/bin/bash", "-c"]
     command:
       - >

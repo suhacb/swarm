@@ -8,7 +8,13 @@ if ! docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q acti
   exit 1
 fi
 
+# Production tiers stay non-attachable — only services declared in a
+# stack file can join, nothing ad hoc. ci-mesh is the deliberate exception:
+# GitLab Runner's docker executor creates job containers via plain Docker
+# API calls (not Swarm services), so they can only join a network that
+# allows that.
 NETWORKS=(public-ingress app-mesh data-mesh)
+ATTACHABLE_NETWORKS=(ci-mesh)
 
 for net in "${NETWORKS[@]}"; do
   if docker network inspect "$net" >/dev/null 2>&1; then
@@ -20,6 +26,19 @@ for net in "${NETWORKS[@]}"; do
     --driver overlay \
     --opt encrypted \
     --attachable=false \
+    "$net"
+done
+
+for net in "${ATTACHABLE_NETWORKS[@]}"; do
+  if docker network inspect "$net" >/dev/null 2>&1; then
+    echo "Network '$net' already exists, skipping."
+    continue
+  fi
+  echo "Creating encrypted attachable overlay network '$net'..."
+  docker network create \
+    --driver overlay \
+    --opt encrypted \
+    --attachable=true \
     "$net"
 done
 

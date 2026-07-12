@@ -1,21 +1,59 @@
 networks:
   public-ingress:
     external: true
+  ci-mesh:
+    external: true
 
 services:
   nginx:
     image: nginx:1.27-alpine
     networks:
-      - public-ingress
+      public-ingress:
+        # Lets any OTHER container on this network (e.g. GitLab, for its
+        # OIDC calls to Keycloak) reach these hostnames directly at nginx,
+        # over real TLS with the real cert, routed exactly like external
+        # traffic — instead of hitting a backend container's internal IP
+        # directly, which would see a different Host and have no TLS at
+        # all. Add a new entry here for every service's public hostname.
+        aliases:
+          - keycloak.suhac.eu
+          - gitlab.suhac.eu
+      ci-mesh:
+        # Same alias trick, extended to CI job containers: GitLab Runner's
+        # Docker executor creates job containers as plain `docker run`
+        # sibling containers (not Swarm services) attached to ci-mesh only —
+        # they never join public-ingress, so they'd otherwise have no way to
+        # reach gitlab.suhac.eu (git clone, job traces) or registry.suhac.eu
+        # (image push/pull) at all. GitLab and the registry themselves don't
+        # need to join ci-mesh for this — nginx already resolves gitlab:80
+        # and gitlab:5050 via its own public-ingress membership regardless
+        # of which network the inbound request arrived on.
+        aliases:
+          - gitlab.suhac.eu
+          - registry.suhac.eu
     ports:
-      - "80:80"
-      - "443:443"
+      # mode: host bypasses Swarm's routing-mesh SNAT — without it, every
+      # connection nginx sees is rewritten to a generic overlay-network
+      # address (confirmed live: a request from this very host showed up
+      # as 10.0.0.2), making $remote_addr useless for both the LAN-only
+      # admin-console gate below and per-client rate limiting. No downside
+      # on a single-node Swarm — the routing mesh only matters for
+      # balancing across multiple nodes.
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
     volumes:
       # Bind-mounted (not Swarm configs) so editing files under config/nginx/
       # on the repo checkout takes effect on `docker service update --force`
       # without juggling versioned config objects.
       - /Users/blazsuhac/Documents/projects/swarm/config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - /Users/blazsuhac/Documents/projects/swarm/config/nginx/conf.d:/etc/nginx/conf.d:ro
+      - /Users/blazsuhac/Documents/projects/swarm/config/nginx/snippets:/etc/nginx/snippets:ro
       # NOT /etc/letsencrypt directly: Certbot locks live/ and archive/ down
       # to root:wheel 0700, and Docker Desktop's file-sharing bridge runs as
       # the logged-in user, not root — it can't read those paths at any

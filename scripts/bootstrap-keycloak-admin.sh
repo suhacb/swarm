@@ -5,6 +5,11 @@
 # password and enroll TOTP (Google Authenticator, or any RFC 6238 app) on
 # its next login. Safe to re-run — it just re-applies the same two required
 # actions.
+#
+# Authenticates as the automation-cli service account, not the human admin:
+# kcadm's direct-grant login can't supply a live TOTP code, so it stops
+# working the moment the admin account actually enrolls MFA. See
+# docs/DEPLOY.md for how automation-cli was bootstrapped.
 set -euo pipefail
 
 ADMIN_USER="suhacb"
@@ -15,12 +20,10 @@ if [ -z "$CONTAINER" ]; then
   exit 1
 fi
 
-read -rsp "Current password for '$ADMIN_USER' (the one in the keycloak_admin_password secret): " ADMIN_PASSWORD
-echo
-
+AUTOMATION_SECRET=$(docker exec "$CONTAINER" cat /run/secrets/keycloak_automation_client_secret)
 docker exec "$CONTAINER" /opt/keycloak/bin/kcadm.sh config credentials \
   --server http://localhost:8080 --realm master \
-  --user "$ADMIN_USER" --password "$ADMIN_PASSWORD"
+  --client automation-cli --secret "$AUTOMATION_SECRET"
 
 USER_ID=$(docker exec "$CONTAINER" /opt/keycloak/bin/kcadm.sh get users \
   -r master -q "username=$ADMIN_USER" --fields id --format csv --noquotes | tail -n1)

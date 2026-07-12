@@ -1,0 +1,66 @@
+# GitLab Runner, Docker executor. The runner manager process itself has no
+# persistent footprint beyond config.toml — every CI/CD job runs in its own
+# ephemeral sibling container, created via the host's Docker socket (not
+# Docker-in-Docker), and is removed once the job finishes.
+#
+# ci-mesh is the only network this needs: it's attachable (unlike the tiered
+# production networks), it's where nginx advertises gitlab.suhac.eu and
+# registry.suhac.eu for both the manager and every job container to resolve,
+# and job containers reach it via docker.network_mode below, not by joining
+# any Swarm service network.
+networks:
+  ci-mesh:
+    external: true
+
+secrets:
+  gitlab_runner_token:
+    external: true
+
+services:
+  gitlab-runner:
+    image: gitlab/gitlab-runner:latest
+    networks:
+      - ci-mesh
+    secrets:
+      - gitlab_runner_token
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -f /etc/gitlab-runner/config.toml ]; then
+          gitlab-runner register --non-interactive \
+            --url "https://gitlab.suhac.eu/" \
+            --token "$$(cat /run/secrets/gitlab_runner_token)" \
+            --executor docker \
+            --docker-image "docker:24-cli" \
+            --docker-network-mode "ci-mesh" \
+            --docker-volumes "/var/run/docker.sock:/var/run/docker.sock" \
+            --docker-memory "1g" \
+            --request-concurrency 2
+        fi
+        sed -i 's/^concurrent = .*/concurrent = 1/' /etc/gitlab-runner/config.toml
+        exec gitlab-runner run
+    volumes:
+      # Job containers are created as siblings on the HOST's Docker daemon,
+      # not nested inside this container — same socket-mount pattern as
+      # every other "runner talks to Docker" setup, no privileged DinD.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # config.toml persists here across container recreation so `register`
+      # above only ever runs once, the same idempotent-if-missing pattern
+      # used by scripts/setup-gitlab-keycloak.sh.
+      - /opt/swarm-data/gitlab-runner/config:/etc/gitlab-runner
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          # The manager itself just polls for jobs and shells out to Docker;
+          # actual job resource usage is bounded separately per job container
+          # via --docker-memory above.
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager

@@ -1,4 +1,4 @@
-# Deploying Phase 1 (Keycloak + Nginx)
+# Deployment Runbook
 
 All commands assume you're running them **on the Mac Mini** (`10.10.10.202`),
 in the repo root (`/Users/blazsuhac/Documents/projects/swarm`), via Screen
@@ -59,11 +59,14 @@ Run that once to confirm it works, then add the same `--deploy-hook` flag to
 whatever command the LaunchDaemon already runs, and `sudo launchctl kickstart
 -k system/eu.suhac.certbot-renew` to pick up the change.
 
+## Phase 1: Keycloak + Nginx
+
 ## 4. Deploy the shared Postgres server
 
 One Postgres process hosts a separate database + role per service (Keycloak
-first, Gitea/apps later) — see `stacks/data-stack.yml` for why. It needs its
-own superuser secret:
+first, GitLab's shared app databases later — GitLab itself uses its own
+bundled Postgres, not this one, see Phase 2 below) — see
+`stacks/data-stack.yml` for why. It needs its own superuser secret:
 
 ```bash
 openssl rand -base64 32 | docker secret create postgres_admin_password -
@@ -140,8 +143,7 @@ docker service logs -f infra_keycloak
 docker service logs -f proxy_nginx
 ```
 
-Then browse to `https://keycloak.suhac.eu` and `https://keycloak.lan.suhac.eu`
-— both should hit the same Keycloak instance. Log in to the admin console at
+Then browse to `https://keycloak.suhac.eu`. Log in to the admin console at
 `/admin` with user `suhacb` and the password you put in
 `keycloak_admin_password`. You should immediately be prompted to set a new
 password and scan a QR code to enroll Google Authenticator.
@@ -156,7 +158,7 @@ curl -I http://anything-else.suhac.eu/     # expect 301 -> https://anything-else
 
 ## MFA options (for later realms too)
 
-Keycloak's built-in second-factor options, for when Gitea/apps get their own
+Keycloak's built-in second-factor options, for when other apps get their own
 realms:
 
 - **TOTP** (what's enabled above) — works with Google Authenticator, Authy,
@@ -170,16 +172,412 @@ realms:
 - **SMS/email OTP** — *not* built into core Keycloak, needs a third-party SPI
   provider. Skip unless there's a real need.
 
-The steps above force MFA on the `suhacb` account specifically. To make TOTP
-mandatory for *all* users of a given realm, change the "OTP Form" execution
-in that realm's browser authentication flow from `CONDITIONAL` to
-`REQUIRED` (Authentication → browser flow, in the admin console) — worth
-doing per-realm once Gitea/apps are wired up to Keycloak, not before.
+The steps above force MFA on the `suhacb` master-realm account specifically.
+Phase 2 below does the same thing realm-wide, for every user of a given
+realm — the mechanism is the same authentication-flow change, just applied
+once per realm instead of once per user.
 
-## Known follow-ups (not blocking, but worth doing)
+## Known follow-ups from Phase 1 (not blocking, but worth doing)
 
 - **Wire up the certbot deploy-hook** (step 3.5) so the cert copy doesn't go
   stale after the first renewal — a manual copy only lasts until then.
 - **Keycloak memory headroom**: 750M is tight for Keycloak. Watch
   `docker service logs infra_keycloak` and `docker stats` after first deploy,
   especially during realm imports or heavy admin console use, for OOM kills.
+
+## Phase 2: GitLab with Keycloak SSO
+
+Real GitLab CE (not Gitea — revisited from the original plan; see issue #2).
+Reachable at `gitlab.suhac.eu`. This is the dominant memory consumer on the
+box once running — see the numbers at the end of this section.
+
+### 1. Bootstrap a Keycloak automation client (one-time, manual)
+
+`kcadm.sh`'s direct-grant login can't supply a live TOTP code, so once the
+`suhacb` master-realm admin actually has MFA enrolled (Phase 1, step 9),
+scripted `kcadm` access breaks. The fix is a dedicated service-account
+client that authenticates via client credentials instead of a human
+password — this has to be created once through the Admin Console (browser
+handles MFA fine; `kcadm` direct-grant doesn't), since creating it via
+`kcadm` would itself need an already-authenticated session.
+
+1. Log into `https://keycloak.suhac.eu/admin` (from the LAN — see the
+   perimeter hardening section below), **master** realm.
+2. **Clients → Create client**. OpenID Connect, Client ID: `automation-cli`. Next.
+3. Turn **on** "Client authentication" and "Service accounts roles"; turn
+   **off** "Standard flow" and "Direct access grants". Save.
+4. Open the client → **Service accounts roles** tab → **Assign role**.
+   - Filter by clients → `master-realm` → select all its roles.
+   - Filter by realm roles → select `create-realm` (a separate mechanism —
+     master-realm client roles alone aren't enough to create new realms).
+5. **Credentials** tab → copy the client secret.
+
+```bash
+printf '%s' '<the secret from step 5>' | docker secret create keycloak_automation_client_secret -
+```
+
+Add it to `infrastructure-stack.yml`'s `keycloak` service secrets (already
+done in this repo) and redeploy so it's mounted into the container:
+
+```bash
+docker stack deploy -c stacks/infrastructure-stack.yml infra
+```
+
+Every `scripts/*.sh` that talks to `kcadm` now authenticates as
+`automation-cli` by reading this secret from inside the Keycloak container —
+no more interactive password/TOTP prompts, and it never touches the human
+admin's MFA-protected login path.
+
+### 2. Provision the Keycloak side
+
+```bash
+./scripts/setup-gitlab-keycloak.sh
+```
+
+Idempotent — creates (or confirms) all of:
+
+- Realm `suhacb`, separate from `master`
+- A reordered copy of the realm's browser flow (`browser-suhacb`), fixing a
+  real bug in this Keycloak version: new realms get "Browser - Conditional
+  OTP" ordered *before* "Username Password Form", so the OTP condition
+  tries to check a user that doesn't exist yet and throws a
+  NullPointerException before the login form even renders. Built-in flows
+  can't be reordered directly, hence the duplicate-and-swap.
+- MFA (TOTP) required for every user this script creates — via the
+  `CONFIGURE_TOTP` required action on each one, not a flow-level change.
+  (An earlier version of this script instead flipped the "Browser -
+  Conditional OTP" subflow itself to `REQUIRED`, which caused the *same*
+  premature-evaluation crash as the ordering bug above. The required action
+  alone gets the same practical outcome — forced enrollment on first login,
+  required on every login after — without touching the flow.)
+- Groups `gitlab-admins`, `gitlab-users`
+- Users `gitlab-admin` (in gitlab-admins) and `suhacb` (in gitlab-users)
+  — prints a temporary password for each, shown once, forcing password
+  reset + TOTP enrollment on first login
+- OIDC client `gitlab`, with a `groups` claim mapper, and the
+  `gitlab_oidc_client_secret` Docker secret
+
+### 3. Host directories and remaining secrets
+
+```bash
+sudo mkdir -p /opt/swarm-data/gitlab/config /opt/swarm-data/gitlab/logs /opt/swarm-data/gitlab/data
+sudo chown -R "$(whoami)" /opt/swarm-data/gitlab
+cp config/gitlab/gitlab.rb.template /opt/swarm-data/gitlab/config/gitlab.rb
+
+openssl rand -base64 24 | docker secret create gitlab_root_password -
+```
+
+`gitlab.rb` is **copied**, not bind-mounted read-only like `nginx.conf` —
+GitLab writes other files into `/etc/gitlab` as it runs (secrets, SSH host
+keys), so it needs to be a real persistent directory. Editing it later means
+editing `/opt/swarm-data/gitlab/config/gitlab.rb` directly, then
+`gitlab-ctl reconfigure` inside the container — the template in this repo
+won't re-apply itself.
+
+### 4. Deploy
+
+```bash
+docker stack deploy -c stacks/gitlab-stack.yml gitlab
+docker stack deploy -c stacks/proxy-stack.yml proxy   # picks up conf.d/gitlab.conf + the new nginx network aliases
+```
+
+First boot runs a full `gitlab-ctl reconfigure` — expect several minutes,
+watch with `docker service logs -f gitlab_gitlab`.
+
+### 5. First login and admin promotion
+
+Browse to `https://gitlab.suhac.eu` (or the `.lan` hostname), click "Sign in
+with Keycloak", and log in as `gitlab-admin` with the temporary password
+from step 2 — you'll be walked through setting a new password and enrolling
+TOTP, same flow as Phase 1.
+
+GitLab only creates its local user record on first login, so **after** that
+first login:
+
+```bash
+./scripts/bootstrap-gitlab-admin.sh gitlab-admin
+```
+
+GitLab CE doesn't reliably auto-promote admins from an OIDC group claim
+(group-based admin sync is gated to SAML/paid tiers) — this script is the
+guaranteed-to-work alternative. The built-in `root` account (password in the
+`gitlab_root_password` secret) stays available independently, for
+break-glass access if Keycloak itself is ever unreachable.
+
+### 6. Single logout + Keycloak-only login
+
+Two more real-world gaps beyond just wiring up login:
+
+- **Logout didn't mean logout**: GitLab sign-out only destroyed GitLab's own
+  session cookie. Keycloak's SSO session (a separate cookie on a different
+  hostname) stayed alive, so clicking "sign in with Keycloak" again just
+  silently re-authenticated as whoever was last logged in, without asking.
+- **A local admin nobody wanted**: the bootstrap `root` account is a normal
+  GitLab user with a password, independent of Keycloak entirely.
+
+```bash
+./scripts/configure-gitlab-sso-logout.sh
+./scripts/configure-gitlab-oidc-only.sh
+```
+
+The first makes GitLab's sign-out redirect through Keycloak's own logout
+endpoint (`client_id` + `post_logout_redirect_uri`, no `id_token_hint`
+needed — registered on the client as `post.logout.redirect.uris` by
+`setup-gitlab-keycloak.sh`) before returning to GitLab, so it actually ends
+the SSO session. The second disables local username/password login (both
+web and git-over-HTTP; Personal Access Tokens are unaffected) *and* open
+self-registration (GitLab warns about open signup by default anyway, and
+it's pointless once no self-set password can log in) via
+`ApplicationSetting` — **not** a `gitlab.rb` key, an easy mix-up since it
+looks exactly like the settings that are.
+
+`gitlab.rb` also sets `omniauth_auto_sign_in_with_provider = 'openid_connect'`
+so unauthenticated visits skip GitLab's own sign-in page entirely and go
+straight to Keycloak (implemented as a tiny auto-submitting form, not an
+HTTP redirect — if you curl `/users/sign_in` expecting a 302 you'll get a
+200 with a 10-line HTML page instead; a real browser executes it instantly).
+
+`root` is not deleted — once password auth is off it's simply unreachable
+from the web, but stays available via `gitlab-rails console`/`runner`
+directly on the server as a break-glass path independent of Keycloak.
+
+Also worth running once, unrelated to auth: GitLab's admin dashboard flags
+"Web IDE single origin fallback" as a high-severity risk by default (it
+serves VS Code assets from GitLab's own origin — defeating the point of
+sandboxing extension code on a separate origin — if that separate domain
+is ever unreachable). Disabling the fallback is GitLab's own recommended
+fix:
+
+```bash
+./scripts/harden-gitlab-web-ide.sh
+```
+
+### 7. Importing existing projects
+
+A fresh instance ships with **no** project import sources enabled at all
+("No import options available" in New project → Import project until this
+runs):
+
+```bash
+./scripts/enable-gitlab-import-sources.sh github
+```
+
+Valid sources: `github`, `bitbucket`, `bitbucket_server`, `fogbugz`, `git`
+(generic git URL), `gitlab_project` (GitLab export file), `gitea`,
+`manifest`. Merges into whatever's already enabled rather than replacing
+it, so re-running to add another source later doesn't disable this one.
+
+For GitHub specifically: New project → Import project → GitHub, paste a
+GitHub Personal Access Token (classic, `repo` scope), pick the repo. Pulls
+branches/commits/tags plus issues, PRs (as merge requests), comments,
+labels, and milestones in one pass — a real git-level mirror would only
+get the git data, not the GitHub-specific metadata. GitHub usernames only
+map to GitLab accounts that already exist with a matching identity, so
+expect most historical authorship to just show as whoever ran the import.
+
+### 8. Perimeter hardening
+
+Once the box is genuinely internet-facing, it starts getting hit by normal
+background scanning/crawling within hours — none of this is a response to
+an actual incident, just baseline hardening for that reality. Real
+firewall/network-level protection is out of scope here by design (handled
+upstream, on the router).
+
+```bash
+./scripts/harden-keycloak-brute-force.sh master suhacb
+```
+
+Both realms shipped with `bruteForceProtected` **off**. Enables it with
+`failureFactor=5` (Keycloak's own default is 30) — since MFA is already
+required realm-wide, this only protects the password step, and 5 failed
+attempts is enough margin for a real user who knows their own password.
+Temporary lockout, not permanent (`permanentLockout=false`), so a
+legitimate lockout self-resolves rather than needing admin intervention.
+Re-run for any future realm.
+
+Nginx also gets two rate-limit zones (`config/nginx/nginx.conf`): `general`
+(10r/s, burst 20) applied to every vhost, and a tighter `auth` zone (2r/s,
+burst 5) applied specifically to Keycloak's login form submission
+(`/realms/*/login-actions/authenticate`) as defense in depth alongside the
+brute-force lockout above. The general zone matters less for security than
+for protecting GitLab's tight memory budget from being hammered by
+scanner/bot traffic. Verified live by actually flooding both endpoints and
+confirming `503`s appear, not just checked for valid syntax.
+
+A few more, applied directly (no script — small, one-off ApplicationSetting/
+realm changes):
+
+- **GitLab Admin Mode** (`admin_mode: true`) — the Admin Area now requires
+  re-authentication even if already logged in, protecting against session
+  hijacking or an unlocked laptop. Was off by default.
+- **GitLab system hooks** can no longer reach the local network
+  (`allow_local_requests_from_system_hooks: false`) — unused feature, no
+  reason to leave it able to. Webhook SSRF protection
+  (`allow_local_requests_from_web_hooks_and_services`) was already off by
+  default; nothing to do there.
+- **Keycloak password policy** — `length(12) and notUsername and notEmail`
+  on both realms. MFA already covers most of the real risk here, but there
+  was no policy at all before, so a self-set one-character password was
+  technically possible.
+- **Nginx TLS ciphers** — Mozilla's "Intermediate" cipher list for TLS 1.2
+  (TLS 1.3 always uses its own strong, fixed suite regardless). Verified
+  live: forcing `-tls1_2` negotiates a cipher straight from the configured
+  list, not just whatever OpenSSL happened to default to.
+- **Keycloak admin console LAN-only restriction was tried and dropped.** It
+  originally worked by gating on a second hostname (`keycloak.lan.suhac.eu`)
+  — removed along with that hostname (see "Single hostname" below). The
+  replacement attempt, source-IP filtering (`allow 10.10.10.0/24; deny
+  all;`), turned out to be impossible on Docker Desktop for Mac: confirmed
+  live that Docker Desktop's own VM-boundary NAT rewrites *every* client's
+  source IP to its internal gateway address before any container sees it —
+  LAN, WAN, and even the host machine's own requests all become
+  indistinguishable — regardless of Swarm's publish mode. `/admin` is
+  reachable from `keycloak.suhac.eu` from anywhere now; MFA, the password
+  policy, and brute-force lockout are the real protections left on it. A
+  real fix (VPN, or a router-level firewall rule ahead of the Mac Mini
+  entirely) is a separate, bigger undertaking if this needs revisiting.
+
+### Known limitations
+
+- **Bundled Postgres/Redis**: GitLab uses its own internal database, not the
+  shared `data_postgres` server, to avoid GitLab's specific extension/version
+  requirements colliding with what other services expect from that instance.
+- **Single hostname, no `.lan` variant**: `gitlab.suhac.eu` and
+  `keycloak.suhac.eu` are the only hostnames — no `.lan.suhac.eu` duality.
+  There used to be one: a second hostname existed specifically so a router
+  DNS override could point it at the box's LAN IP, working around real
+  browsers increasingly defaulting to their own DNS-over-HTTPS resolver
+  (Cloudflare, Google) for the public hostname, bypassing router-local DNS
+  overrides and hitting a NAT hairpin from inside the LAN. In practice the
+  second hostname just added confusion (which one do you use where) without
+  adding capability — a Local DNS Record override on the router (UDR7) for
+  the **same** public hostname → the box's LAN IP achieves the identical
+  outcome with one name instead of two. If you're setting this up fresh and
+  hit the hairpin/DoH issue, that's the fix — not a second hostname.
+
+## Phase 2b: CI/CD — GitLab Runner + Container Registry
+
+GitLab Runner (Docker executor) plus GitLab's bundled Container Registry, for
+MR pipelines and "build once, promote many" image deploys. The runner manager
+itself has no persistent footprint beyond its config — every job runs in its
+own ephemeral sibling container, created via the host's Docker socket (not
+Docker-in-Docker), removed once the job finishes.
+
+### 1. Container Registry
+
+Already enabled in `config/gitlab/gitlab.rb.template` (`registry['enable']`,
+`registry_external_url 'https://registry.suhac.eu'`, `registry_nginx[...]`
+mirroring the same "our own Nginx terminates TLS, Omnibus's internal nginx
+only speaks plain HTTP" pattern as the main GitLab vhost). For an existing
+deployment, apply it the same way any other `gitlab.rb` change is applied —
+edit `/opt/swarm-data/gitlab/config/gitlab.rb` directly, then
+`gitlab-ctl reconfigure` inside the container.
+
+`registry.suhac.eu` needs no new DNS or cert work — one level deep, already
+covered by the existing wildcard record and cert. If it's unreachable from
+inside the LAN, add the same router Local DNS Record override already used
+for `gitlab.suhac.eu`/`keycloak.suhac.eu` (see the "Single hostname" note
+above) rather than a separate `.lan` hostname.
+
+### 2. Deploy the registry's Nginx vhost and `ci-mesh`
+
+```bash
+docker stack deploy -c stacks/proxy-stack.yml proxy
+```
+
+Picks up `config/nginx/conf.d/registry.conf` (new vhost) and the `ci-mesh`
+network membership on `nginx` (aliases `gitlab.suhac.eu` and
+`registry.suhac.eu`) — the same alias trick already used for
+`public-ingress`, extended so CI job containers (which only ever join
+`ci-mesh`, never `public-ingress`) can still reach both over real TLS.
+GitLab and the registry itself don't need to join `ci-mesh` for this — Nginx
+already resolves `gitlab:80`/`gitlab:5050` via its own `public-ingress`
+membership regardless of which network the inbound request arrived on.
+
+### 3. Get a runner authentication token
+
+Admin Area → CI/CD → Runners → **New instance runner**. Pick tags (e.g.
+`docker`, `swarm-homelab`) and whether to run untagged jobs, then copy the
+`glrt-…` authentication token shown (this is the new token-based flow —
+GitLab 19.x removed the old shared registration token entirely).
+
+```bash
+sudo mkdir -p /opt/swarm-data/gitlab-runner/config
+sudo chown -R "$(whoami)" /opt/swarm-data/gitlab-runner
+printf '%s' '<the glrt-... token>' | docker secret create gitlab_runner_token -
+```
+
+### 4. Deploy the runner
+
+```bash
+docker stack deploy -c stacks/gitlab-runner-stack.yml gitlab-runner
+```
+
+First start runs `gitlab-runner register` once (idempotent — skipped on
+every later restart once `config.toml` exists on the bind-mounted config
+dir) using the token secret, Docker executor, `docker:24-cli` as the default
+job image, `network_mode=ci-mesh`, and the host's Docker socket mounted into
+job containers too (so a job's own `docker build`/`docker push` steps talk
+to the same host daemon). `concurrent = 1` matches the tight RAM budget —
+one job at a time.
+
+### 5. Verify
+
+```bash
+docker service logs -f gitlab-runner_gitlab-runner
+```
+
+Should show `Runner registered successfully` then start polling for jobs.
+Confirm in the UI (Admin Area → CI/CD → Runners) that it shows **online**,
+or via `gitlab-rails runner "puts Ci::Runner.find(1).online?"` inside the
+GitLab container.
+
+A minimal `.gitlab-ci.yml` smoke test that actually exercises the full
+path — clone, Docker executor, build, registry auth, push:
+
+```yaml
+build:
+  stage: build
+  image: docker:24-cli
+  tags: [docker]
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+```
+
+### Known limitations
+
+- **Nginx's ports publish in `mode: host`, not Swarm's default routing
+  mesh** — bypasses one real layer of IP-masking (Swarm's ingress mode SNATs
+  every connection to a generic overlay address; verified live, a request
+  from the host itself showed up in nginx's logs as `10.0.0.2`). No downside
+  on a single-node Swarm (the mesh only matters for balancing across nodes),
+  so left in place even though it turned out not to be sufficient on its
+  own — see the next point.
+- **Per-client rate limiting (`limit_req_zone $binary_remote_addr ...`) is
+  not actually per-client on this Docker Desktop for Mac setup.** `mode:
+  host` above fixes Swarm's own SNAT, but Docker Desktop for Mac has a
+  second, deeper NAT layer at the macOS-host/Linux-VM boundary that rewrites
+  *every* client's source IP to its internal gateway address (confirmed
+  live while investigating a LAN-only admin-console restriction — see
+  Phase 2's "Known limitations"). Nothing in this stack can bypass that
+  layer; on a real Linux host (no Docker Desktop VM in between) this
+  wouldn't be an issue and `mode: host` alone would be sufficient. Until
+  then, rate limiting still blunts aggregate flooding, just not per-visitor.
+- **Sidekiq can silently wedge under this Docker Desktop setup**: seen twice
+  — once after a `gitlab-ctl reconfigure` restarted Sidekiq but its paired
+  log/rotation process didn't cleanly restart alongside it (fixed with
+  `kill -9` on the stuck log process to force runit to respawn it cleanly);
+  once as a live 500 on a real project caused by the same underlying
+  `application_json.log` file transiently disappearing out from under an
+  open file handle (self-resolved when Docker's own healthcheck killed and
+  Swarm auto-restarted the container). Root cause looks like Docker
+  Desktop's virtiofs bind-mount layer occasionally hiccupping on fresh file
+  opens under this bind-mounted logs directory specifically — the same class
+  of issue as the certs-mount fix in step 3.5, not something fixable from
+  inside the container. If GitLab seems wedged (Sidekiq queue not draining,
+  random 500s) with `gitlab-ctl status` still showing everything "run:",
+  check `Sidekiq::ProcessSet.new.size` via `gitlab-rails runner` — `0` means
+  it's lost its Redis heartbeat despite the process being alive, and a full
+  Docker Desktop restart is the most reliable fix found so far.
