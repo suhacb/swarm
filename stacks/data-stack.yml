@@ -9,14 +9,31 @@
 # convention: role == database == service name) and the matching
 # <service>_db_password secret for that service's own stack to consume.
 #
-# MySQL + phpMyAdmin are still pending — see
-# https://github.com/suhacb/swarm/issues/3
+# pgAdmin4 fulfills the originally-planned "web-based Postgres manager"
+# (phpMyAdmin was the MySQL-era placeholder — the actual target ended up
+# being Postgres, so pgAdmin fits directly). It spans all three networks
+# for the same reason Keycloak does: public-ingress (Nginx), data-mesh
+# (talks to postgres below), app-mesh (OIDC calls to Keycloak). Gated on
+# Keycloak SSO only (AUTHENTICATION_SOURCES=['oauth2'] in config_local.py,
+# see config/pgadmin/) — a LAN-only alternative was ruled out, see
+# docs/DEPLOY.md's "Known limitations" (Docker Desktop's VM-boundary NAT
+# already made IP-based gating impossible for Keycloak's own admin
+# console). See scripts/setup-princess-keycloak.sh's sibling client setup
+# and https://github.com/suhacb/swarm/issues/8.
 networks:
+  public-ingress:
+    external: true
+  app-mesh:
+    external: true
   data-mesh:
     external: true
 
 secrets:
   postgres_admin_password:
+    external: true
+  pgadmin_keycloak_client_secret:
+    external: true
+  pgadmin_admin_password:
     external: true
 
 services:
@@ -58,6 +75,58 @@ services:
       restart_policy:
         condition: any
         delay: 5s
+      placement:
+        constraints:
+          - node.role == manager
+
+  pgadmin:
+    image: dpage/pgadmin4:8.14
+    networks:
+      - public-ingress
+      - app-mesh
+      - data-mesh
+    environment:
+      # Required by the image even though local login is effectively
+      # unreachable once AUTHENTICATION_SOURCES=['oauth2'] — bootstraps a
+      # break-glass local account, same role as GitLab's root account.
+      PGADMIN_DEFAULT_EMAIL: admin@suhac.eu
+    secrets:
+      - pgadmin_keycloak_client_secret
+      - pgadmin_admin_password
+    # Runs as root ONLY for this wrapper step — /pgadmin4 isn't writable
+    # by the default non-root pgadmin user (confirmed live: "Permission
+    # denied"). This is a documented-supported mode for this image: its
+    # own /entrypoint.sh explicitly reassigns to a non-root user via
+    # su-exec before starting gunicorn when it detects it's running as
+    # root, so the real server process still ends up non-root.
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        export PGADMIN_DEFAULT_PASSWORD="$$(cat /run/secrets/pgadmin_admin_password)" &&
+        sed "s/__KEYCLOAK_CLIENT_SECRET__/$$(cat /run/secrets/pgadmin_keycloak_client_secret)/"
+        /etc/pgadmin/config_local.py.template > /pgadmin4/config_local.py &&
+        exec /entrypoint.sh
+    volumes:
+      - /Users/blazsuhac/Documents/projects/swarm/config/pgadmin/config_local.py.template:/etc/pgadmin/config_local.py.template:ro
+      - /opt/swarm-data/pgadmin:/var/lib/pgadmin
+    healthcheck:
+      # This image's /bin/sh is NOT bash (confirmed live, same as Qdrant's
+      # image — dash-like, no /dev/tcp support). bash exists at /bin/bash.
+      test: ["CMD", "/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/80 && printf 'GET /misc/ping HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
       placement:
         constraints:
           - node.role == manager

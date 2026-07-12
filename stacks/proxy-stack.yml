@@ -18,6 +18,9 @@ services:
         aliases:
           - keycloak.suhac.eu
           - gitlab.suhac.eu
+          - princess.suhac.eu
+          - staging.princess.suhac.eu
+          - pg.suhac.eu
       ci-mesh:
         # Same alias trick, extended to CI job containers: GitLab Runner's
         # Docker executor creates job containers as plain `docker run`

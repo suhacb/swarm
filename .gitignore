@@ -11,6 +11,7 @@ tmp.md
 *.key
 *.crt
 secrets/
+config/princess/test-users.csv
 
 # Docker Swarm runtime data (bind-mounted volumes, stack state)
 data/

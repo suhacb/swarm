@@ -581,3 +581,243 @@ build:
   check `Sidekiq::ProcessSet.new.size` via `gitlab-rails runner` — `0` means
   it's lost its Redis heartbeat despite the process being alive, and a full
   Docker Desktop restart is the most reliable fix found so far.
+
+## Phase 3: Princess service
+
+Angular SPA + Laravel API, `princess.suhac.eu` (prod) and
+`staging.princess.suhac.eu` (staging), path-routed at the Nginx layer —
+no Traefik, no `api.*` subdomain (no CORS config exists in the backend
+repo, and same-origin avoids ever needing one). Tracked in
+[issue #8](https://github.com/suhacb/swarm/issues/8), supersedes #3/#4/#5.
+
+### 1. Postgres: one role, four databases
+
+```bash
+./scripts/create-princess-databases.sh
+```
+
+Creates role `princess` and databases `princess` (prod), `stage_princess`
+(staging), `e2e_princess` (frontend-driven E2E — see step 5 below),
+`test_princess` (CI), plus the `princess_db_password` secret shared across
+all four. `test_princess`'s credentials additionally need adding as a
+masked/protected GitLab CI/CD variable on the `princess_backend` project —
+a GitLab project setting, not scriptable from here.
+
+### 2. Keycloak
+
+```bash
+./scripts/setup-princess-keycloak.sh
+```
+
+Idempotent — creates (or confirms) all of:
+
+- `suhacb` realm (prod): realm roles `princess-admin`/`princess-user`,
+  groups `princess-admins`/`princess-users` with the matching role
+  attached via group role-mapping, `suhacb` added to `princess-users`,
+  confidential client `princess-client` (redirect
+  `https://princess.suhac.eu/*`) → secret `princess_keycloak_client_secret`
+- New `princess-test` realm (staging): password policy `length(12) and
+  upperCase(1) and digits(1)`, the same browser-flow reorder fix from
+  Phase 2 (a bug in this Keycloak version's default new-realm flow
+  ordering — applies regardless of whether MFA is required), same
+  roles/groups as prod, confidential client `princess-client` (redirect
+  `https://staging.princess.suhac.eu/*`) →  secret
+  `princess_test_keycloak_client_secret`, and 11 test users from
+  `config/princess/test-users.csv` (gitignored — create it yourself from
+  the princess team's table before running this script; it's never
+  committed since this repo is public). Their passwords are set directly
+  and permanent, no forced reset, no TOTP — this realm has no MFA
+  anywhere, deliberately, for frictionless repeat manual testing.
+
+### 3. Shared services: Qdrant, ZincSearch, Garage
+
+Neither ZincSearch's nor Garage's image has a shell at all (confirmed
+live — no `/bin/sh`, no busybox), which rules out two patterns used
+elsewhere in this repo: the entrypoint-wrapper trick that turns a mounted
+Docker secret file into an env var (Keycloak/GitLab), and CMD-SHELL
+healthchecks (also need a shell). Each service's credentials are handled
+differently as a result:
+
+```bash
+sudo mkdir -p /opt/swarm-data/qdrant /opt/swarm-data/zincsearch /opt/swarm-data/garage/meta /opt/swarm-data/garage/data
+sudo chown -R "$(whoami)" /opt/swarm-data/qdrant /opt/swarm-data/zincsearch /opt/swarm-data/garage
+
+# Garage: render a REAL config once, secrets baked directly into a
+# host-only file — same "copied, not bind-mounted, never committed"
+# pattern already used for gitlab.rb (no shell inside the container to do
+# runtime substitution, unlike Keycloak/GitLab's wrapper trick).
+cp config/garage/garage.toml.template /opt/swarm-data/garage/garage.toml
+sed -i '' "s/__RPC_SECRET__/$(openssl rand -hex 32)/" /opt/swarm-data/garage/garage.toml
+sed -i '' "s/__ADMIN_TOKEN__/$(openssl rand -hex 32)/" /opt/swarm-data/garage/garage.toml
+sed -i '' "s/__METRICS_TOKEN__/$(openssl rand -hex 32)/" /opt/swarm-data/garage/garage.toml
+
+# ZincSearch: no shell and no *_FILE-style env convention either, so the
+# bootstrap admin password comes from `docker stack deploy`'s own ${VAR}
+# interpolation (confirmed live — it substitutes from the deploying
+# shell's environment, same as docker-compose) instead of a Docker
+# secret file. The secret below is still created purely as a durable
+# record of the value; the container never reads it directly.
+ZINC_PW=$(openssl rand -base64 24)
+printf '%s' "$ZINC_PW" | docker secret create zincsearch_admin_password -
+export ZINC_FIRST_ADMIN_PASSWORD="$ZINC_PW"
+
+docker stack deploy -c stacks/shared-services-stack.yml shared-services
+```
+
+`ZINC_FIRST_ADMIN_PASSWORD` must be exported in the **same shell** that
+runs `docker stack deploy` — interpolation happens client-side at parse
+time, so re-deploying this stack later without re-exporting it will blank
+the value out. Qdrant's image does have a shell, but it's not bash (no
+`/dev/tcp` support) — its healthcheck explicitly invokes `/usr/bin/bash`
+rather than relying on `CMD-SHELL`'s default `/bin/sh`.
+
+Then bootstrap Garage's buckets and princess's scoped access key (layout
+itself is handled by the `--single-node` server flag, not this script):
+
+```bash
+./scripts/setup-garage.sh
+```
+
+Creates buckets `princess`/`staging-princess`/`e2e-princess`/`test-princess`
+— **hyphens**, confirmed live that Garage enforces S3 bucket-naming rules
+(underscores are rejected) — and one key (`princess`) with read/write/owner
+on exactly those four, secrets `princess_garage_key_id` /
+`princess_garage_secret_key`. Qdrant collection/ZincSearch index naming
+follows the usual underscore convention (unaffected by this — it's not
+enforced server-side either) — see the README's "Shared Qdrant /
+ZincSearch / Garage" section.
+
+### 4. Postgres web manager: pgAdmin4
+
+```bash
+sudo mkdir -p /opt/swarm-data/pgadmin
+sudo chown -R "$(whoami)" /opt/swarm-data/pgadmin
+
+./scripts/setup-pgadmin-keycloak.sh
+openssl rand -base64 24 | docker secret create pgadmin_admin_password -
+
+docker stack deploy -c stacks/data-stack.yml data
+```
+
+Gated on Keycloak SSO only (`AUTHENTICATION_SOURCES=['oauth2']` in
+`config/pgadmin/config_local.py.template`, `OAUTH2_AUTO_CREATE_USER=False`)
+— a LAN-only alternative (the team's "Plan B") was ruled out: this Docker
+Desktop for Mac host can't do IP-based gating at all (see Phase 2's "Known
+limitations" — the same VM-boundary NAT issue that killed Keycloak's own
+admin-console LAN gate). `suhacb` already has TOTP enrolled from Phase 1,
+so this login is already MFA-covered without any extra work.
+
+Three things confirmed live and worth knowing before touching this
+service again:
+
+- **pgAdmin 8.14's OAuth2 code reads `OAUTH2_TOKEN_URL`/
+  `OAUTH2_AUTHORIZATION_URL`/`OAUTH2_API_BASE_URL`/`OAUTH2_USERINFO_ENDPOINT`
+  directly** — `OAUTH2_SERVER_METADATA_URL` alone (what most docs show)
+  isn't enough on this version despite being accepted too; all five are
+  set in `config/pgadmin/config_local.py.template`.
+- **`/pgadmin4` isn't writable by the image's default non-root user** —
+  the entrypoint wrapper that renders `config_local.py` runs as `user:
+  "0:0"` in `data-stack.yml` for that reason. This is a documented-
+  supported mode for this image: its own `/entrypoint.sh` detects it's
+  running as root and re-execs the actual gunicorn process as a non-root
+  user via `su-exec`, so the real server still ends up unprivileged.
+- **This image's `/bin/sh` isn't bash** (same gotcha as Qdrant below) —
+  the healthcheck invokes `/bin/bash` explicitly rather than relying on
+  `CMD-SHELL`'s default shell.
+
+After first deploy, pre-provision the owner's account — `OAUTH2_AUTO_CREATE_USER=False`
+means nobody logs in until an account exists for their exact email
+(pgAdmin derives the login username from the `email` claim, no
+`OAUTH2_USERNAME_CLAIM` configured):
+
+```bash
+docker exec <data_pgadmin container> /venv/bin/python3 /pgadmin4/setup.py \
+  add-external-user suhacb@suhac.eu --auth-source oauth2 --email suhacb@suhac.eu --admin --active
+```
+
+Then log in once via `https://pg.suhac.eu` to confirm the OIDC round-trip
+end to end, and manually add the "Shared Postgres" server connection
+inside pgAdmin's UI — its superuser password is whatever was put in
+`postgres_admin_password` back in Phase 1; retrieve it if needed with
+`docker exec <data_postgres container> cat /run/secrets/postgres_admin_password`.
+It's deliberately never baked into any pgAdmin config file.
+
+### 5. Nginx: path-priority routing
+
+```bash
+docker stack deploy -c stacks/proxy-stack.yml proxy
+```
+
+Picks up `config/nginx/conf.d/princess.conf` (prod + staging, each with a
+`location ^~ /api/` prefix match that wins over the plain `location /`
+catch-all — same "the SPA never sees API traffic" property Traefik would
+give, without adding Traefik), `config/nginx/conf.d/pgadmin.conf`, and the
+new `public-ingress` aliases (`princess.suhac.eu`,
+`staging.princess.suhac.eu`, `pg.suhac.eu`) on `nginx` itself.
+
+Two new DNS entries needed (Cloudflare, outside this repo, same wildcard
+cert covers all of it): `princess.suhac.eu`, `staging.princess.suhac.eu`.
+`pg.suhac.eu` is a third, beyond what the princess team originally scoped.
+
+The frontend's E2E suite needs no separate `e2e.*` hostname or deployment
+at all — it hits `staging.princess.suhac.eu` with an `X-E2E-Token` header,
+and the backend's own `E2eAuth` middleware transparently switches that
+request onto the isolated `e2e_princess` database.
+
+### 6. Apps: princess frontend + backend
+
+`stacks/apps-stack.yml` is written and ready (services `princess-backend`,
+`princess-backend-staging`, `princess-frontend`, `princess-frontend-staging`)
+but its image path (`registry.suhac.eu/princess/...`) is a placeholder —
+`docker stack deploy -c stacks/apps-stack.yml apps` will fail to pull until
+the princess team's own GitLab project actually exists and pushes images
+there. Confirm the Container Registry is enabled for that project (already
+enabled instance-wide, see Phase 2b) once it's created, adjust the image
+path in the stack file to match, then deploy.
+
+### 7. CI/CD deploy trigger
+
+Lives entirely in the princess team's own `.gitlab-ci.yml`, not in this
+repo — their runner job containers already reach the host Docker daemon
+(the same `gitlab-runner` from Phase 2b, `docker.sock` already mounted, no
+change needed here), so a deploy stage is just:
+
+```yaml
+deploy:
+  stage: deploy
+  image: docker:24-cli
+  tags: [docker]
+  script:
+    - docker service update --image "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" apps_princess-backend
+```
+
+No SSH keypair, no webhook endpoint needed — this is strictly less
+infrastructure than either alternative the princess team proposed, for
+the same result, on a single-node swarm.
+
+### Known limitations
+
+- **Memory is tight.** Current service memory *limits* already summed to
+  ~6.1GB out of the VM's ~7.75GB total before this phase (GitLab alone
+  budgeted 4.88GB, actual usage ~2.7GB). This phase adds ~2GB more in
+  limits (shared services + princess frontend/backend ×2 envs + pgAdmin).
+  Watch `docker stats` closely after each new stack deploy; GitLab's limit
+  has real slack to reclaim (actual usage is well under half its limit) if
+  something else needs the headroom.
+- **`apps-stack.yml`'s image path and a few backend env var names are
+  placeholders** (search for "ADJUST") pending the princess team's actual
+  GitLab group/project path and confirmed app config keys.
+- **Qdrant's `/bin/sh` isn't bash either** — same as pgAdmin above,
+  confirmed live (`cannot create /dev/tcp/...: Directory nonexistent`
+  under `/bin/sh`, works fine under `/bin/bash`). Its healthcheck in
+  `shared-services-stack.yml` invokes `/usr/bin/bash` explicitly via
+  `CMD`, not `CMD-SHELL`, for that reason.
+- **Redeploying `data-stack.yml` restarted `data_postgres` briefly**, the
+  first time this phase's changes went in — unrelated to anything in this
+  phase: `postgres:16-alpine` is an unpinned floating tag, and it had
+  moved to a new image digest upstream since Phase 1. `docker stack
+  deploy` re-resolves and updates on any digest change regardless of
+  which service in the file you actually touched. Recovered cleanly with
+  no data loss (bind-mounted volume, unaffected by the image swap), but
+  worth knowing before redeploying this file again — any future digest
+  drift will do the same thing.

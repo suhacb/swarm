@@ -1,0 +1,26 @@
+# Rendered ONCE into /opt/swarm-data/garage/garage.toml (real secrets
+# substituted in, host-only, never committed) — copied, not bind-mounted
+# directly, same pattern as gitlab.rb.template. Garage's image has no
+# shell to do runtime substitution itself (confirmed live: no /bin/sh),
+# unlike Keycloak/GitLab's bootstrap-secret wrapper trick. See
+# docs/DEPLOY.md's Phase 3 section for the exact render step.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+# Single physical node — no real replication possible or needed here.
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "__RPC_SECRET__"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.internal"
+
+[admin]
+api_bind_addr = "[::]:3903"
+admin_token = "__ADMIN_TOKEN__"
+metrics_token = "__METRICS_TOKEN__"

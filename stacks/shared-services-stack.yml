@@ -1,0 +1,123 @@
+# Shared, swarm-level Qdrant/ZincSearch/Garage — run once, used by any
+# service that needs a vector index, full-text index, or S3-compatible
+# object storage, rather than a dedicated instance each (same reasoning as
+# the shared Postgres server in data-stack.yml).
+#
+# app-mesh only: backends reach these internally; none of the three are
+# exposed on public-ingress — nothing here has asked for direct public
+# reachability (e.g. presigned browser uploads), so access goes through
+# whichever backend service proxies it.
+#
+# Naming convention (enforced by the CONSUMING app's own config, not by
+# anything server-side except Garage's bucket/key scoping — see
+# scripts/setup-garage.sh): production names are bare, every other
+# environment is prefixed with its env name. For princess specifically:
+#   - Garage buckets: princess, staging-princess, e2e-princess, test-princess
+#     (HYPHENS — confirmed live that Garage enforces S3 bucket-naming
+#     rules, which reject underscores; every other name below is
+#     unaffected and keeps this repo's usual underscore convention)
+#   - Qdrant collections: princess_*, staging_princess_*, e2e_princess_*, test_princess_*
+#   - ZincSearch indices: same prefix pattern as Qdrant
+#
+# NEITHER zincsearch NOR garage's images have a shell (confirmed live —
+# both are minimal Go/Rust static-binary images, no /bin/sh, no busybox).
+# That rules out the entrypoint-wrapper trick used elsewhere in this repo
+# (Keycloak/GitLab) to turn a mounted Docker secret file into an env var,
+# AND rules out CMD-SHELL healthchecks (which also need a shell). See
+# docs/DEPLOY.md's Phase 3 section for how each service's credentials are
+# actually delivered instead.
+#
+# Tracked in https://github.com/suhacb/swarm/issues/8 (supersedes #4).
+networks:
+  app-mesh:
+    external: true
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.13.3
+    networks:
+      - app-mesh
+    volumes:
+      - /opt/swarm-data/qdrant:/qdrant/storage
+    healthcheck:
+      # This image's /bin/sh is NOT bash (confirmed live — dash-like, no
+      # /dev/tcp support: "Directory nonexistent"). bash does exist, just
+      # at /usr/bin/bash — invoke it explicitly via CMD, not CMD-SHELL
+      # (which always wraps in /bin/sh).
+      test: ["CMD", "/usr/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 384M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  zincsearch:
+    image: public.ecr.aws/zinclabs/zincsearch:0.4.10
+    networks:
+      - app-mesh
+    environment:
+      ZINC_FIRST_ADMIN_USER: admin
+      # No shell in this image to translate a mounted Docker secret file
+      # into an env var, and ZincSearch has no *_FILE-style convention for
+      # this setting — so the value comes from docker-stack-deploy's own
+      # ${VAR} interpolation (confirmed live: it substitutes from the
+      # deploying shell's environment, same as docker-compose) rather than
+      # a Docker secret. See docs/DEPLOY.md for the export-then-deploy step.
+      ZINC_FIRST_ADMIN_PASSWORD: ${ZINC_FIRST_ADMIN_PASSWORD}
+      ZINC_DATA_PATH: /data
+    volumes:
+      - /opt/swarm-data/zincsearch:/data
+    # No healthcheck: no shell and no curl/wget/nc inside this image to
+    # probe with. restart_policy below still recovers a genuine crash.
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  garage:
+    image: dxflrs/garage:v2.3.0
+    networks:
+      - app-mesh
+    entrypoint: ["/garage"]
+    command: ["server", "--single-node"]
+    volumes:
+      # A fully-rendered config, not a template with runtime substitution
+      # (no shell in this image to do that) — generated ONCE on the host
+      # from config/garage/garage.toml.template and never committed, same
+      # "copied, not bind-mounted, secrets live on the host only" pattern
+      # already used for gitlab.rb. See docs/DEPLOY.md's Phase 3 section.
+      - /opt/swarm-data/garage/garage.toml:/etc/garage.toml:ro
+      - /opt/swarm-data/garage/meta:/var/lib/garage/meta
+      - /opt/swarm-data/garage/data:/var/lib/garage/data
+    # No healthcheck: no shell/tools inside this image to probe with.
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager

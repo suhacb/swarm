@@ -14,11 +14,18 @@ service configs.
 │   └── keycloak/Dockerfile    # pre-built ("optimized") Keycloak image
 ├── config/
 │   ├── nginx/                 # bind-mounted into the proxy stack
-│   └── gitlab/gitlab.rb.template  # copied (not mounted) to /opt/swarm-data/gitlab
+│   ├── gitlab/gitlab.rb.template  # copied (not mounted) to /opt/swarm-data/gitlab
+│   ├── garage/garage.toml.template   # bind-mounted, secrets rendered in at container start
+│   ├── pgadmin/config_local.py.template # same rendering pattern, for pgAdmin's OAuth2 config
+│   └── princess/test-users.csv    # gitignored — 11 princess-test realm test users, never committed
 ├── scripts/
 │   ├── bootstrap-keycloak-admin.sh    # forces password reset + TOTP on admin
 │   ├── create-postgres-db.sh          # provisions a role+db+secret per service
+│   ├── create-princess-databases.sh   # one role (princess) across 4 databases
 │   ├── setup-gitlab-keycloak.sh       # realm/groups/users/MFA/OIDC client for GitLab
+│   ├── setup-princess-keycloak.sh     # suhacb realm additions + new princess-test realm
+│   ├── setup-pgadmin-keycloak.sh      # OIDC client for pgAdmin, in the suhacb realm
+│   ├── setup-garage.sh                # bucket + scoped-key bootstrap for princess
 │   ├── bootstrap-gitlab-admin.sh      # promotes a user to GitLab admin
 │   ├── configure-gitlab-sso-logout.sh # GitLab sign-out also ends the Keycloak session
 │   ├── configure-gitlab-oidc-only.sh  # disables local password login + signup for GitLab
@@ -27,13 +34,13 @@ service configs.
 │   ├── harden-keycloak-brute-force.sh # enables lockout on login failures (off by default)
 │   └── certbot-deploy-hook.sh         # keeps the readable cert copy in sync
 ├── stacks/
-│   ├── data-stack.yml            # shared Postgres server (+ planned MySQL/phpMyAdmin)
+│   ├── data-stack.yml            # shared Postgres server + pgAdmin4 (Keycloak SSO)
 │   ├── infrastructure-stack.yml  # Keycloak
 │   ├── gitlab-stack.yml          # GitLab CE (+ bundled Container Registry)
 │   ├── gitlab-runner-stack.yml   # GitLab Runner, Docker executor
 │   ├── proxy-stack.yml           # Nginx reverse proxy / TLS termination
-│   ├── search-stack.yml          # (planned) ZincSearch, Qdrant
-│   └── apps-stack.yml            # (planned) Angular/Vue/Laravel/.NET apps
+│   ├── shared-services-stack.yml # Qdrant, ZincSearch, Garage
+│   └── apps-stack.yml            # princess frontend/backend, prod + staging
 └── docs/
     └── DEPLOY.md               # step-by-step deploy runbook
 ```
@@ -55,6 +62,20 @@ One Postgres server (`data-stack.yml`) hosts a separate database + role per
 service — cheaper on 8GB than a dedicated instance each. Convention: role
 name == database name == service name (e.g. `keycloak`). Provision a new
 service with `./scripts/create-postgres-db.sh <service-name>`.
+
+## Shared Qdrant / ZincSearch / Garage
+
+`shared-services-stack.yml` runs one instance of each, used by any service
+that needs a vector index, full-text index, or S3-compatible object storage —
+same reasoning as the shared Postgres server. Naming convention: production
+names are bare (`princess` bucket, `princess_*` collections/indices), every
+other environment prefixes its own name — hyphenated for Garage buckets
+(`staging-princess`, `e2e-princess`, `test-princess`; Garage enforces S3
+bucket-naming rules, which reject underscores), underscored everywhere else
+(`staging_princess_*`, `e2e_princess_*`, `test_princess_*` collections/
+indices). Only Garage enforces this server-side (via scoped access keys, see
+`scripts/setup-garage.sh`); Qdrant/ZincSearch naming is up to the consuming
+app's own config.
 
 ## Getting started
 

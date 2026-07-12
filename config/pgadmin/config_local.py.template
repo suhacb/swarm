@@ -1,0 +1,31 @@
+# Bind-mounted read-only; pgAdmin's entrypoint wrapper (see data-stack.yml)
+# substitutes the client-secret placeholder below from a Docker secret
+# into a writable copy at /pgadmin4/config_local.py before exec'ing the
+# image's real /entrypoint.sh — same wrapper pattern used for Keycloak/
+# GitLab/Garage. (Deliberately not spelling the placeholder out again
+# here — the substitution is a blanket sed over the whole file, so any
+# literal occurrence gets replaced too, including in comments.)
+#
+# oauth2-only: no local pgAdmin password can log in once this is the only
+# entry in AUTHENTICATION_SOURCES. PGADMIN_DEFAULT_EMAIL/PASSWORD (set via
+# env in data-stack.yml) still bootstraps a local account for break-glass
+# CLI access (gunicorn/setup.py), same as GitLab's unreachable-but-not-
+# deleted root account.
+AUTHENTICATION_SOURCES = ['oauth2']
+OAUTH2_AUTO_CREATE_USER = False
+
+OAUTH2_CONFIG = [{
+    'OAUTH2_NAME': 'keycloak',
+    'OAUTH2_DISPLAY_NAME': 'suhac.eu Keycloak',
+    'OAUTH2_CLIENT_ID': 'pgadmin',
+    'OAUTH2_CLIENT_SECRET': '__KEYCLOAK_CLIENT_SECRET__',
+    # pgAdmin 8.14's oauth2.py indexes these four directly (confirmed live
+    # by reading its actual source) — OAUTH2_SERVER_METADATA_URL alone
+    # isn't enough to derive them despite being accepted below too.
+    'OAUTH2_TOKEN_URL': 'https://keycloak.suhac.eu/realms/suhacb/protocol/openid-connect/token',
+    'OAUTH2_AUTHORIZATION_URL': 'https://keycloak.suhac.eu/realms/suhacb/protocol/openid-connect/auth',
+    'OAUTH2_API_BASE_URL': 'https://keycloak.suhac.eu/realms/suhacb/protocol/openid-connect/',
+    'OAUTH2_USERINFO_ENDPOINT': 'https://keycloak.suhac.eu/realms/suhacb/protocol/openid-connect/userinfo',
+    'OAUTH2_SERVER_METADATA_URL': 'https://keycloak.suhac.eu/realms/suhacb/.well-known/openid-configuration',
+    'OAUTH2_SCOPE': 'openid email profile',
+}]

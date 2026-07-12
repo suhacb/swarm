@@ -1,3 +1,186 @@
-# Angular, Vue, Laravel/PHP, C#/.NET application containers.
-# Tracked in https://github.com/suhacb/swarm/issues/5 — not yet implemented.
-# Needs a registry decision (GHCR vs Docker Hub) before writing this stack.
+# princess: Angular SPA + Laravel API, prod + staging. This stack is
+# correct in SHAPE but its `docker stack deploy` will fail-to-pull until
+# the princess team's own GitLab project pushes real images to
+# registry.suhac.eu — that's an expected gap, not a bug to chase (see
+# docs/DEPLOY.md's Phase 3 section). Image path and a few env var names
+# below are placeholders pending their actual GitLab group/project path
+# and app config keys — search for "ADJUST" to find them.
+#
+# Networking: backends need public-ingress (Nginx's /api/* split),
+# app-mesh (Keycloak, Garage, Qdrant, ZincSearch), and data-mesh
+# (Postgres). Frontends need public-ingress only — the browser talks to
+# both frontend and backend directly; neither container talks to the
+# other, so the frontend never needs app-mesh/data-mesh at all.
+#
+# E2E has no separate deployment: the frontend's E2E suite hits the
+# staging backend with an X-E2E-Token header, and the app's own
+# E2eAuth middleware (app/Http/Middleware/E2eAuth.php) transparently
+# switches the request onto the isolated e2e_princess database.
+#
+# Tracked in https://github.com/suhacb/swarm/issues/8 (supersedes #5).
+networks:
+  public-ingress:
+    external: true
+  app-mesh:
+    external: true
+  data-mesh:
+    external: true
+
+secrets:
+  princess_db_password:
+    external: true
+  princess_keycloak_client_secret:
+    external: true
+  princess_test_keycloak_client_secret:
+    external: true
+  princess_garage_key_id:
+    external: true
+  princess_garage_secret_key:
+    external: true
+  zincsearch_admin_password:
+    external: true
+
+services:
+  princess-backend:
+    # ADJUST: real GitLab group/project path once created.
+    image: registry.suhac.eu/princess/princess_backend:latest
+    networks:
+      - public-ingress
+      - app-mesh
+      - data-mesh
+    environment:
+      APP_ENV: production
+      DB_CONNECTION: pgsql
+      DB_HOST: data_postgres
+      DB_PORT: "5432"
+      DB_DATABASE: princess
+      DB_USERNAME: princess
+      OIDC_ISSUER: https://keycloak.suhac.eu/realms/suhacb
+      OIDC_CLIENT_ID: princess-client
+      GARAGE_ENDPOINT: http://shared-services_garage:3900
+      GARAGE_BUCKET: princess
+      QDRANT_URL: http://shared-services_qdrant:6333
+      QDRANT_COLLECTION_PREFIX: princess
+      ZINC_URL: http://shared-services_zincsearch:4080
+      ZINC_INDEX_PREFIX: princess
+      ZINC_USER: admin
+    secrets:
+      - princess_db_password
+      - princess_keycloak_client_secret
+      - princess_garage_key_id
+      - princess_garage_secret_key
+      - zincsearch_admin_password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  princess-backend-staging:
+    image: registry.suhac.eu/princess/princess_backend:latest
+    networks:
+      - public-ingress
+      - app-mesh
+      - data-mesh
+    environment:
+      APP_ENV: staging
+      DB_CONNECTION: pgsql
+      DB_HOST: data_postgres
+      DB_PORT: "5432"
+      DB_DATABASE: stage_princess
+      DB_USERNAME: princess
+      OIDC_ISSUER: https://keycloak.suhac.eu/realms/princess-test
+      OIDC_CLIENT_ID: princess-client
+      GARAGE_ENDPOINT: http://shared-services_garage:3900
+      # Hyphen, not underscore: Garage enforces S3 bucket-naming rules,
+      # which reject underscores — a Garage-only exception to this repo's
+      # usual underscore convention (see shared-services-stack.yml).
+      GARAGE_BUCKET: staging-princess
+      QDRANT_URL: http://shared-services_qdrant:6333
+      QDRANT_COLLECTION_PREFIX: staging_princess
+      ZINC_URL: http://shared-services_zincsearch:4080
+      ZINC_INDEX_PREFIX: staging_princess
+      ZINC_USER: admin
+    secrets:
+      - princess_db_password
+      - princess_test_keycloak_client_secret
+      - princess_garage_key_id
+      - princess_garage_secret_key
+      - zincsearch_admin_password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 384M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  princess-frontend:
+    image: registry.suhac.eu/princess/princess_frontend:latest
+    networks:
+      - public-ingress
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  princess-frontend-staging:
+    image: registry.suhac.eu/princess/princess_frontend:latest
+    networks:
+      - public-ingress
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
