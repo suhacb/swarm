@@ -1,6 +1,8 @@
 networks:
   public-ingress:
     external: true
+  ci-mesh:
+    external: true
 
 services:
   nginx:
@@ -18,6 +20,19 @@ services:
           - keycloak.lan.suhac.eu
           - gitlab.suhac.eu
           - gitlab.lan.suhac.eu
+      ci-mesh:
+        # Same alias trick, extended to CI job containers: GitLab Runner's
+        # Docker executor creates job containers as plain `docker run`
+        # sibling containers (not Swarm services) attached to ci-mesh only —
+        # they never join public-ingress, so they'd otherwise have no way to
+        # reach gitlab.suhac.eu (git clone, job traces) or registry.suhac.eu
+        # (image push/pull) at all. GitLab and the registry themselves don't
+        # need to join ci-mesh for this — nginx already resolves gitlab:80
+        # and gitlab:5050 via its own public-ingress membership regardless
+        # of which network the inbound request arrived on.
+        aliases:
+          - gitlab.suhac.eu
+          - registry.suhac.eu
     ports:
       - "80:80"
       - "443:443"

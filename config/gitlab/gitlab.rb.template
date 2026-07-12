@@ -22,6 +22,27 @@ nginx['listen_https'] = false
 # the whole private range rather than one IP that can change on redeploy.
 gitlab_rails['trusted_proxies'] = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
 
+# --- Container Registry ---
+# Own hostname (covered by the existing wildcard cert, no new DNS/cert work
+# needed), same "our own Nginx terminates TLS, Omnibus's internal nginx only
+# speaks plain HTTP" pattern as the main GitLab vhost above. registry_nginx
+# shares the same underlying Chef recipe as the main nginx[...] block, so the
+# same keys (listen_https, proxy_set_headers) apply here too — Omnibus's
+# per-section docs just print one example set, not because the others don't
+# support it.
+registry['enable'] = true
+registry_external_url 'https://registry.suhac.eu'
+registry_nginx['enable'] = true
+registry_nginx['listen_port'] = 5050
+registry_nginx['listen_https'] = false
+registry_nginx['proxy_set_headers'] = {
+  "Host" => "$http_host",
+  "X-Real-IP" => "$remote_addr",
+  "X-Forwarded-For" => "$proxy_add_x_forwarded_for",
+  "X-Forwarded-Proto" => "https",
+  "X-Forwarded-Ssl" => "on"
+}
+
 # --- OIDC login via Keycloak ---
 # issuer uses the SAME public hostname a browser would, resolved internally
 # to our own nginx via the network aliases in proxy-stack.yml — not a
@@ -73,6 +94,5 @@ prometheus_monitoring['enable'] = false
 puma['worker_processes'] = 0
 puma['max_threads'] = 4
 sidekiq['max_concurrency'] = 10
-registry['enable'] = false
 gitlab_pages['enable'] = false
 gitlab_kas['enable'] = false
