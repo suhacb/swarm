@@ -47,6 +47,14 @@
 # exception: it keeps its own native OIDC from Phase 3, gated the same
 # way via a groups check in its own config instead.
 #
+# onlyoffice: app-mesh ONLY, deliberately no public-ingress — accessible
+# from inside the swarm only (princess-backend calling it directly via
+# service name), no public hostname, no oauth2-proxy gate needed. Runs as
+# root by default (has bash, unlike Qdrant/ZincSearch/Garage above) —
+# official vendor guidance is 4GB RAM; given this box's tight budget,
+# deliberately under-provisioned to 1.5GB and will need watching under
+# real document-conversion load, not a full sizing guarantee.
+#
 # Tracked in https://github.com/suhacb/swarm/issues/8 (supersedes #4).
 networks:
   public-ingress:
@@ -56,6 +64,8 @@ networks:
 
 secrets:
   zincsearch_admin_password:
+    external: true
+  onlyoffice_jwt_secret:
     external: true
   oauth2_proxy_client_secret:
     external: true
@@ -244,6 +254,48 @@ services:
       restart_policy:
         condition: on-failure
         delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  onlyoffice:
+    image: onlyoffice/documentserver:latest
+    networks:
+      - app-mesh
+    secrets:
+      - onlyoffice_jwt_secret
+    environment:
+      JWT_ENABLED: "true"
+    # Has a real shell (confirmed live) and runs as root by default,
+    # unlike Qdrant/ZincSearch/Garage/oauth2-proxy above — the ordinary
+    # entrypoint-wrapper pattern applies here with no workaround needed.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >
+        export JWT_SECRET="$$(cat /run/secrets/onlyoffice_jwt_secret)" &&
+        exec /app/ds/run-document-server.sh
+    volumes:
+      - /opt/swarm-data/onlyoffice/logs:/var/log/onlyoffice
+      - /opt/swarm-data/onlyoffice/data:/var/www/onlyoffice/Data
+      - /opt/swarm-data/onlyoffice/lib:/var/lib/onlyoffice
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          # Vendor-recommended minimum is 4GB; deliberately under-
+          # provisioned given this box's tight overall budget — see the
+          # header comment above. Watch docker stats under real load.
+          memory: 1536M
+      restart_policy:
+        condition: on-failure
+        delay: 15s
       placement:
         constraints:
           - node.role == manager
