@@ -35,4 +35,12 @@ OAUTH2_CONFIG = [{
     # via the groups mapper scripts/setup-infra-tools-keycloak.sh attaches
     # to this client.
     'OAUTH2_ADDITIONAL_CLAIMS': {'groups': ['pgadmin-admins']},
+    # Without this, pgAdmin's own Sign Out only clears its own session
+    # cookie, leaving the underlying Keycloak SSO session alive — same gap
+    # GitLab had in Phase 2 (see configure-gitlab-sso-logout.sh). oauth2.py
+    # applies .format(redirect_uri=request.url_root, id_token=...) to this
+    # string; client_id + post_logout_redirect_uri is enough for Keycloak,
+    # no id_token_hint needed (registered on the pgadmin client's
+    # post.logout.redirect.uris attribute by setup-pgadmin-keycloak.sh).
+    'OAUTH2_LOGOUT_URL': 'https://keycloak.suhac.eu/realms/suhacb/protocol/openid-connect/logout?client_id=pgadmin&post_logout_redirect_uri={redirect_uri}',
 }]

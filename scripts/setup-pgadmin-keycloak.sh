@@ -49,4 +49,14 @@ kcadm update "clients/$CLIENT_UUID" -r "$REALM" \
   -s "redirectUris=[\"$REDIRECT\"]" \
   -s 'webOrigins=["https://pg.suhac.eu"]'
 
+# Lets Keycloak's logout endpoint accept client_id + post_logout_redirect_uri
+# without needing an id_token_hint — used by config/pgadmin's
+# OAUTH2_LOGOUT_URL so pgAdmin's own Sign Out also ends the Keycloak SSO
+# session, instead of leaving it alive (same gap GitLab had — see
+# configure-gitlab-sso-logout.sh — confirmed live: without this, switching
+# between pgAdmin/Qdrant/ZincSearch/Garage's separate dedicated accounts in
+# one browser silently kept reusing whichever was logged in last).
+kcadm update "clients/$CLIENT_UUID" -r "$REALM" \
+  -s 'attributes."post.logout.redirect.uris"="https://pg.suhac.eu/*"'
+
 echo "Done."
