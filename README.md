@@ -59,7 +59,12 @@ Encrypted overlay networks, tiered by trust:
 - `data-mesh` — backends, Keycloak, all databases (never reaches public-ingress)
 - `ci-mesh` — the one attachable exception: GitLab Runner's Docker executor
   creates job containers via plain `docker run`, not Swarm services, so they
-  can only join a network that allows that
+  can only join a network that allows that. Also joined by `data_postgres`/
+  `garage`/`zincsearch`/`qdrant` directly (a deliberate, discussed
+  tradeoff — see `docs/DEPLOY.md`'s Phase 3 "E2E" section) so the princess
+  E2E CI job can reach the real shared data services for its `e2e_`-
+  prefixed data, since app-mesh/data-mesh are non-attachable and
+  structurally unreachable for a plain `docker run` container
 
 ## Shared Postgres
 
@@ -100,8 +105,11 @@ turned out not to exist for two of the three (Qdrant only supports an
 API key, not an interactive login; Garage's web UI has no auth at all),
 so the simplest genuinely-secure answer was to just not expose any of
 them externally — see `docs/DEPLOY.md`'s Phase 3 section for the full
-story. All three are `app-mesh` only; internal backends reach them
-directly by service name, unaffected.
+story. All three stay off `public-ingress`; internal backends reach
+them directly by service name on `app-mesh`, unaffected. They're also
+on `ci-mesh` (alongside `data_postgres`) purely so the princess E2E CI
+job can reach them — that's about a different network entirely, not a
+change to their public reachability.
 
 ## Getting started
 
