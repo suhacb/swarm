@@ -7,8 +7,30 @@
 # files into /etc/gitlab as it runs (secrets, SSH host keys), so the config
 # lives on the persistent host directory instead. See
 # config/gitlab/gitlab.rb.template and docs/DEPLOY.md.
+#
+# Named Docker volumes, not bind mounts (migrated 2026-07-13): Docker
+# Desktop for Mac's virtiofs bind-mount bridge caused recurring flakiness
+# under GitLab's write load (see docs/DEPLOY.md). Named volumes live inside
+# Docker Desktop's own VM disk and never cross that bridge. The migration
+# uncovered a real, separate bug worth knowing if this is ever redone:
+# GitLab's data already contained root-owned files scattered through every
+# service's data/log directories (accumulated over time, silently tolerated
+# because virtiofs never enforced real Unix permissions on the old bind
+# mount). Named volumes DO enforce real permissions, so Postgres/Redis/
+# registry/Puma all failed to start until every subdirectory was
+# recursively re-chowned to its owner's own UID. gitlab-ctl reconfigure
+# does NOT fix this itself — it only sets ownership on paths it creates,
+# never recurses into a pre-existing populated directory.
 networks:
   public-ingress:
+    external: true
+
+volumes:
+  gitlab_data:
+    external: true
+  gitlab_logs:
+    external: true
+  gitlab_config:
     external: true
 
 secrets:
@@ -37,9 +59,9 @@ services:
         export GITLAB_ROOT_PASSWORD="$$(cat /run/secrets/gitlab_root_password)" &&
         exec /assets/init-container
     volumes:
-      - /opt/swarm-data/gitlab/config:/etc/gitlab
-      - /opt/swarm-data/gitlab/logs:/var/log/gitlab
-      - /opt/swarm-data/gitlab/data:/var/opt/gitlab
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/-/liveness"]
       interval: 30s
