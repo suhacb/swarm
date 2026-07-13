@@ -3,11 +3,12 @@
 # object storage, rather than a dedicated instance each (same reasoning as
 # the shared Postgres server in data-stack.yml).
 #
-# app-mesh ONLY for all three — no public hostnames, no admin UIs exposed
-# at all. A Keycloak+oauth2-proxy gate for Qdrant/ZincSearch/garage-webui's
-# admin UIs was built, tested, and then deliberately reverted: LAN-only
-# access (the original ask) is impossible on this Docker Desktop for Mac
-# host regardless of what auth sits behind it (its VM-boundary NAT rewrites
+# No public hostnames, no admin UIs exposed at all — app-mesh (internal
+# backends) plus ci-mesh (E2E CI job containers, see below) only. A
+# Keycloak+oauth2-proxy gate for Qdrant/ZincSearch/garage-webui's admin
+# UIs was built, tested, and then deliberately reverted: LAN-only access
+# (the original ask) is impossible on this Docker Desktop for Mac host
+# regardless of what auth sits behind it (its VM-boundary NAT rewrites
 # every client's source IP before any container sees it — this is a
 # network-layer fact, not an auth-layer one, so removing Keycloak doesn't
 # sidestep it either). Once "reachable from the whole internet, gated by
@@ -21,6 +22,15 @@
 # access point left to justify running it. Princess (or any other internal
 # backend) still reaches all three directly via app-mesh/service name,
 # unaffected by any of this.
+#
+# ci-mesh membership added separately and later: the princess E2E test
+# suite is fully GitLab-CI-driven (not a swarm stack — deliberately does
+# NOT touch the always-on staging deployment, which stays a stable
+# human-QA environment) and reuses these same shared services for its
+# e2e_-prefixed data. Its job containers are plain `docker run` siblings,
+# not Swarm services, so app-mesh (non-attachable) is structurally
+# unreachable for them — ci-mesh is the swarm's one attachable network,
+# hence these three joining it too. See docs/DEPLOY.md's Phase 3 section.
 #
 # Naming convention (enforced by the CONSUMING app's own config, not by
 # anything server-side except Garage's bucket/key scoping — see
@@ -53,6 +63,8 @@
 networks:
   app-mesh:
     external: true
+  ci-mesh:
+    external: true
 
 secrets:
   zincsearch_admin_password:
@@ -65,6 +77,11 @@ services:
     image: qdrant/qdrant:v1.13.3
     networks:
       - app-mesh
+      # Also ci-mesh — E2E CI job containers (plain `docker run` sibling
+      # containers, not Swarm services, so app-mesh is structurally
+      # unreachable) connect directly for the shared e2e_ collections.
+      # See docs/DEPLOY.md's Phase 3 section.
+      - ci-mesh
     volumes:
       - /opt/swarm-data/qdrant:/qdrant/storage
     healthcheck:
@@ -94,6 +111,9 @@ services:
     image: public.ecr.aws/zinclabs/zincsearch:0.4.10
     networks:
       - app-mesh
+      # Also ci-mesh — same reasoning as qdrant above, for the shared
+      # e2e_ indices.
+      - ci-mesh
     environment:
       ZINC_FIRST_ADMIN_USER: admin
       # No shell in this image to translate a mounted Docker secret file
@@ -125,6 +145,9 @@ services:
     image: dxflrs/garage:v2.3.0
     networks:
       - app-mesh
+      # Also ci-mesh — same reasoning as qdrant above, for the shared
+      # e2e-princess bucket (S3 API + admin API, ports 3900/3903).
+      - ci-mesh
     entrypoint: ["/garage"]
     command: ["server", "--single-node"]
     volumes:

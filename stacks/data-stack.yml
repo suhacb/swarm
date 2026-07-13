@@ -27,6 +27,8 @@ networks:
     external: true
   data-mesh:
     external: true
+  ci-mesh:
+    external: true
 
 secrets:
   postgres_admin_password:
@@ -41,6 +43,12 @@ services:
     image: postgres:16-alpine
     networks:
       - data-mesh
+      # Also on ci-mesh (the swarm's one attachable network) so E2E CI job
+      # containers — plain `docker run` sibling containers, not Swarm
+      # services, so app-mesh/data-mesh are structurally unreachable —
+      # can connect directly for the shared e2e_princess database. See
+      # docs/DEPLOY.md's Phase 3 section.
+      - ci-mesh
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
