@@ -858,32 +858,45 @@ again, is only retrievable from the running container (Docker secrets
 are write-only) — e.g. `docker exec <container> grep -A2 '"outbox"'
 /etc/onlyoffice/documentserver/local.json`, or from `/proc/1/environ`.
 
-### E2E: reuses `staging`, no ephemeral per-run infra
+### E2E: fully GitLab-CI-driven, never touches `staging`
 
-Decided with the princess team (2026-07-13): E2E does **not** get its
-own create→seed→destroy lifecycle. The GitLab Runner is hard-capped at
-`concurrent = 1` (see Phase 2b) — there is never more than one CI job
-running on this box at any moment — which removes the main reason to
-want per-run isolation. Instead:
+Decided with the princess team (2026-07-13, revised same day after an
+initial version that would have deployed MR builds onto `staging` — see
+below for why that was wrong): E2E does **not** get its own
+create→seed→destroy infra lifecycle, and does **not** touch the
+always-on `staging` swarm deployment at all — `staging` is explicitly a
+stable environment for human QA, full stop, never overwritten by a CI
+run. Instead:
 
+- E2E runs as an ephemeral environment entirely orchestrated by GitLab
+  CI itself (the runner's job containers, plain `docker run` siblings
+  via the host's Docker socket — not Swarm services) — building and
+  running the MR's own princess-backend/frontend for the duration of
+  the job, never deployed onto any persistent swarm stack.
 - `princess-test` realm and its 11 fixed test users are shared across
-  every E2E run (confirmed with the princess team: their E2E suite only
-  ever logs in as those existing users, never mutates Keycloak state).
+  every E2E run (confirmed: their E2E suite only ever logs in as those
+  existing users, never mutates Keycloak state) — the ephemeral E2E
+  backend validates against the **real** Keycloak, not a mock.
 - `e2e_princess` (Postgres) and `e2e_`-prefixed Zinc/Qdrant/Garage
-  namespaces are reused and reset-and-reseeded per run (matching
-  `nutrients_backend`'s existing `ZINC_INDEX_PREFIX=e2e_` convention),
-  not created and dropped.
-- Each MR pipeline that runs E2E must first deploy its own build to the
-  `staging` services (`docker service update --image ... apps_princess-
-  backend-staging` / `-frontend-staging`) before running tests — E2E
-  validates whatever's currently on `staging`, so skipping the deploy
-  step would test stale code. This means `staging` doubles as "whatever
-  the most recent E2E-gated MR deployed," not a stable human-QA
-  snapshot — revisit if that turns out to matter for manual QA use.
-- Added `staging.princess.suhac.eu` to `proxy-stack.yml`'s `ci-mesh`
-  aliases (same reasoning as `gitlab.suhac.eu`/`registry.suhac.eu`) so
-  the E2E CI job — which only ever joins `ci-mesh`, never
-  `public-ingress` — can actually reach it over real TLS.
+  namespaces are the swarm's real shared services, reused and
+  reset-and-reseeded per run (matching `nutrients_backend`'s existing
+  `ZINC_INDEX_PREFIX=e2e_` convention) — confirmed explicitly, not the
+  self-contained local `db`/`zincdb`-style throwaway services their own
+  `.testing.env.example` might suggest at first glance.
+- Because CI job containers only ever join `ci-mesh` (the swarm's one
+  attachable network — app-mesh/data-mesh are non-attachable, so
+  structurally unreachable for a plain `docker run` container),
+  `data_postgres`, `garage`, `zincsearch`, and `qdrant` all now also
+  join `ci-mesh` directly, and `keycloak.suhac.eu` was added to
+  `proxy-stack.yml`'s `ci-mesh` aliases (same reasoning as
+  `gitlab.suhac.eu`/`registry.suhac.eu`) — all four confirmed live
+  reachable from a `ci-mesh`-attached container.
+- This does broaden what's reachable from `ci-mesh` beyond "job
+  containers doing builds/registry pushes" to "job containers reaching
+  real data services" — a deliberate, discussed tradeoff, not an
+  oversight. Accepted given the GitLab Runner already has the host's
+  Docker socket mounted, so a compromised CI job already has far
+  greater practical access to this box regardless.
 
 Also decided: `DocumentVersionController::download()` will stream
 objects through `princess-backend` itself rather than redirecting to a
