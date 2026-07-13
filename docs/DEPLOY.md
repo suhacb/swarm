@@ -858,6 +858,39 @@ again, is only retrievable from the running container (Docker secrets
 are write-only) — e.g. `docker exec <container> grep -A2 '"outbox"'
 /etc/onlyoffice/documentserver/local.json`, or from `/proc/1/environ`.
 
+### E2E: reuses `staging`, no ephemeral per-run infra
+
+Decided with the princess team (2026-07-13): E2E does **not** get its
+own create→seed→destroy lifecycle. The GitLab Runner is hard-capped at
+`concurrent = 1` (see Phase 2b) — there is never more than one CI job
+running on this box at any moment — which removes the main reason to
+want per-run isolation. Instead:
+
+- `princess-test` realm and its 11 fixed test users are shared across
+  every E2E run (confirmed with the princess team: their E2E suite only
+  ever logs in as those existing users, never mutates Keycloak state).
+- `e2e_princess` (Postgres) and `e2e_`-prefixed Zinc/Qdrant/Garage
+  namespaces are reused and reset-and-reseeded per run (matching
+  `nutrients_backend`'s existing `ZINC_INDEX_PREFIX=e2e_` convention),
+  not created and dropped.
+- Each MR pipeline that runs E2E must first deploy its own build to the
+  `staging` services (`docker service update --image ... apps_princess-
+  backend-staging` / `-frontend-staging`) before running tests — E2E
+  validates whatever's currently on `staging`, so skipping the deploy
+  step would test stale code. This means `staging` doubles as "whatever
+  the most recent E2E-gated MR deployed," not a stable human-QA
+  snapshot — revisit if that turns out to matter for manual QA use.
+- Added `staging.princess.suhac.eu` to `proxy-stack.yml`'s `ci-mesh`
+  aliases (same reasoning as `gitlab.suhac.eu`/`registry.suhac.eu`) so
+  the E2E CI job — which only ever joins `ci-mesh`, never
+  `public-ingress` — can actually reach it over real TLS.
+
+Also decided: `DocumentVersionController::download()` will stream
+objects through `princess-backend` itself rather than redirecting to a
+presigned Garage URL. `GARAGE_PUBLIC_ENDPOINT` stays permanently blank
+as a result — not a placeholder pending a decision, that decision is
+now made.
+
 ### Known limitations
 
 - **Memory is tight.** Current service memory *limits* already summed to
