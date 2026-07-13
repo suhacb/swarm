@@ -30,10 +30,14 @@ services:
         # (image push/pull) at all. GitLab and the registry themselves don't
         # need to join ci-mesh for this — nginx already resolves gitlab:80
         # and gitlab:5050 via its own public-ingress membership regardless
-        # of which network the inbound request arrived on.
+        # of which network the inbound request arrived on. staging.princess
+        # added for the same reason: the princess E2E CI job needs to reach
+        # it from a job container, over real TLS, to run the E2E suite
+        # against it — see docs/DEPLOY.md's Phase 3 section.
         aliases:
           - gitlab.suhac.eu
           - registry.suhac.eu
+          - staging.princess.suhac.eu
     ports:
       # mode: host bypasses Swarm's routing-mesh SNAT — without it, every
       # connection nginx sees is rewritten to a generic overlay-network
