@@ -27,7 +27,6 @@ service configs.
 │   ├── setup-gitlab-keycloak.sh       # realm/groups/users/MFA/OIDC client for GitLab
 │   ├── setup-princess-keycloak.sh     # suhacb realm additions + new princess-test realm
 │   ├── setup-pgadmin-keycloak.sh      # OIDC client for pgAdmin, in the suhacb realm
-│   ├── setup-infra-tools-keycloak.sh  # oauth2-proxy client + per-tool groups/users
 │   ├── setup-garage.sh                # bucket + scoped-key bootstrap for princess
 │   ├── bootstrap-gitlab-admin.sh      # promotes a user to GitLab admin
 │   ├── configure-gitlab-sso-logout.sh # GitLab sign-out also ends the Keycloak session
@@ -42,7 +41,7 @@ service configs.
 │   ├── gitlab-stack.yml          # GitLab CE (+ bundled Container Registry)
 │   ├── gitlab-runner-stack.yml   # GitLab Runner, Docker executor
 │   ├── proxy-stack.yml           # Nginx reverse proxy / TLS termination
-│   ├── shared-services-stack.yml # Qdrant, ZincSearch, Garage (+ garage-webui, oauth2-proxy)
+│   ├── shared-services-stack.yml # Qdrant, ZincSearch, Garage, OnlyOffice (all internal-only)
 │   └── apps-stack.yml            # princess frontend/backend, prod + staging
 └── docs/
     └── DEPLOY.md               # step-by-step deploy runbook
@@ -52,10 +51,11 @@ service configs.
 
 Encrypted overlay networks, tiered by trust:
 
-- `public-ingress` — Nginx, Keycloak (needs public reachability for login),
-  Qdrant/ZincSearch/garage-webui/oauth2-proxy (their admin UIs are public
-  hostnames too, but gated — see "Admin UI access" below, not left open)
-- `app-mesh` — frontends, backends, Keycloak (token validation)
+- `public-ingress` — Nginx, Keycloak (needs public reachability for login)
+- `app-mesh` — frontends, backends, Keycloak (token validation), plus
+  Qdrant/ZincSearch/Garage/OnlyOffice — deliberately internal-only, no
+  public hostname or admin UI exposed for any of them (see "Admin UI
+  access" below for why)
 - `data-mesh` — backends, Keycloak, all databases (never reaches public-ingress)
 - `ci-mesh` — the one attachable exception: GitLab Runner's Docker executor
   creates job containers via plain `docker run`, not Swarm services, so they
@@ -84,17 +84,24 @@ app's own config.
 
 ## Admin UI access (pgAdmin, Qdrant, ZincSearch, Garage)
 
-All four gated behind Keycloak SSO (`suhacb` realm), one dedicated
-non-obvious-username account + one dedicated group per tool
-(`pgadmin-admins`/`qdrant-admins`/`zinc-admins`/`garage-admins`) —
-deliberately not one shared group, so a compromised credential for one
-tool doesn't expose the other three. pgAdmin has native OIDC support and
-gates itself directly; the other three don't, so a single shared
-`oauth2-proxy` instance sits in front of them, with each Nginx vhost
-enforcing its own required group via oauth2-proxy's per-request
-`allowed_groups` mechanism (see `config/nginx/conf.d/infra-tools.conf`'s
-header comment for two real nginx dead ends hit getting this right, and
-`scripts/setup-infra-tools-keycloak.sh` for the Keycloak side).
+**pgAdmin** is gated behind Keycloak SSO (`suhacb` realm), a dedicated
+non-obvious-username account (`corvid`) in its own `pgadmin-admins`
+group — enforced both by a pre-provisioned pgAdmin account and a real
+`OAUTH2_ADDITIONAL_CLAIMS` group check in its own native OIDC config.
+
+**Qdrant, ZincSearch, and Garage have no admin UI exposed at all** — a
+Keycloak+`oauth2-proxy` gate for them was built and verified working,
+then deliberately reverted. The original ask was LAN-only access, which
+is impossible on this Docker Desktop for Mac host regardless of what
+auth sits behind it (its VM-boundary NAT rewrites every client's source
+IP before any container sees it). Once "reachable from the whole
+internet, gated by login" was the only real option, native logins
+turned out not to exist for two of the three (Qdrant only supports an
+API key, not an interactive login; Garage's web UI has no auth at all),
+so the simplest genuinely-secure answer was to just not expose any of
+them externally — see `docs/DEPLOY.md`'s Phase 3 section for the full
+story. All three are `app-mesh` only; internal backends reach them
+directly by service name, unaffected.
 
 ## Getting started
 

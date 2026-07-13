@@ -795,118 +795,68 @@ No SSH keypair, no webhook endpoint needed — this is strictly less
 infrastructure than either alternative the princess team proposed, for
 the same result, on a single-node swarm.
 
-### 8. Keycloak-gating the admin UIs (Qdrant, ZincSearch, Garage, pgAdmin)
+### 8. Qdrant/ZincSearch/Garage: internal-only, no admin UI exposed (Keycloak gate tried and reverted)
 
-Qdrant/ZincSearch/Garage have no native OIDC support, so a shared
-`oauth2-proxy` gatekeeper sits in front of their (new) public hostnames —
-`qdrant.suhac.eu`, `zinc.suhac.eu`, `garage.suhac.eu` — plus `garage-webui`
-(a third-party community project; Garage itself ships no web GUI at all).
-pgAdmin keeps its own native OIDC from earlier in this phase, just gets a
-second gate added on top.
+A Keycloak+`oauth2-proxy` gate for these three services' admin UIs
+(`qdrant.suhac.eu`, `zinc.suhac.eu`, `garage.suhac.eu`, plus a
+third-party `garage-webui` container for Garage) was built, deployed,
+and verified working — then deliberately reverted in favor of the
+simpler and actually-secure option below. Worth knowing the reasoning
+if this comes up again:
 
-Deliberately **one dedicated account + one dedicated group per tool**
-(`pgadmin-admins`, `qdrant-admins`, `zinc-admins`, `garage-admins`), not
-one shared `infra-admins` group — a compromised credential for one tool
-shouldn't expose the other three. All four still route through a single
-shared `oauth2-proxy` instance (cheaper than four), with per-vhost group
-enforcement handled a specific way — see the dead-ends below.
+- The original ask was LAN-only access. That's impossible on this
+  Docker Desktop for Mac host regardless of what sits behind the gate —
+  its VM-boundary NAT rewrites every client's source IP before any
+  container sees it (same wall Keycloak's own admin console hit in
+  Phase 2). This is a network-layer fact, not an auth-layer one, so
+  swapping Keycloak out for something else doesn't sidestep it.
+- Once "reachable from the whole internet, gated by *some* login" was
+  the only real option, it turned out native logins don't exist for two
+  of the three: Qdrant only supports an optional API key (not an
+  interactive login), and `garage-webui` has no built-in auth at all
+  (confirmed live — its landing page has no mention of login/password
+  anywhere).
+- The simplest option that's actually secure: don't expose any of them
+  externally at all. Network membership alone (never joining
+  `public-ingress`) is a real, working boundary on this host, unlike
+  LAN-vs-WAN IP detection. `garage-webui` was removed entirely as a
+  result — there's no external access point left to justify running it.
+
+Current state: `qdrant`, `zincsearch`, and `garage` are `app-mesh` only.
+Internal backends (princess) reach them directly by service name,
+unaffected. The Keycloak groups/users/client created for the gate
+(`qdrant-admins`/`zinc-admins`/`garage-admins`, `solder`/`lintel`/`quern`,
+the `oauth2-proxy` client) were deleted; `pgadmin-admins`/`corvid` were
+kept — pgAdmin's own native OIDC gate is unrelated and still in place.
+`scripts/setup-infra-tools-keycloak.sh` was deleted along with it.
+
+If this needs revisiting, the real options are a VPN or moving off
+Docker Desktop entirely — not a routing trick, that wall doesn't move.
+
+### OnlyOffice Document Server
+
+Internal-only (`app-mesh`), no public hostname — princess-backend calls
+it directly by service name (`http://onlyoffice`).
 
 ```bash
-./scripts/setup-infra-tools-keycloak.sh
-```
+sudo mkdir -p /opt/swarm-data/onlyoffice/logs /opt/swarm-data/onlyoffice/data /opt/swarm-data/onlyoffice/lib
+sudo chown -R "$(whoami)" /opt/swarm-data/onlyoffice
 
-Idempotent — creates (or confirms) an `oauth2-proxy` confidential client
-in the `suhacb` realm (redirect URIs for all three `/oauth2/callback`
-paths, a "groups" mapper), adds that same "groups" mapper to the existing
-`pgadmin` client (it didn't have one), the four groups above, and one
-user per group with a deliberately non-obvious username (not
-`qdrant-admin` etc.) — same forced-password-reset + mandatory-TOTP
-treatment as `gitlab-admin`/`suhacb` from Phase 2, not the relaxed
-no-MFA princess-test pattern (these are sensitive admin-tool accounts in
-the same realm).
-
-```bash
-openssl rand 32 | docker secret create oauth2_proxy_cookie_secret -
-```
-
-**Must be exactly 32 raw bytes, NOT base64-encoded text** — confirmed
-live: `--cookie-secret-file` reads the file's raw bytes directly as AES
-key material, unlike the plain `--cookie-secret` flag/env var which
-does accept (and expects) base64. `openssl rand -base64 32 | docker
-secret create ...` produces 45 bytes of base64 *text*, which fails to
-start with "must be 16, 24, or 32 bytes to create an AES cipher".
-`oauth2_proxy_client_secret` is created automatically by the script
-above, no separate step needed.
-
-```bash
+openssl rand -base64 32 | docker secret create onlyoffice_jwt_secret -
 docker stack deploy -c stacks/shared-services-stack.yml shared-services
-docker stack deploy -c stacks/proxy-stack.yml proxy
 ```
 
-The first command needs `ZINC_FIRST_ADMIN_PASSWORD` exported in the same
-shell (see step 3 above) — redeploying this file without re-exporting it
-blanks the value out. Retrieve the current one first if it's not still
-in your shell history:
+Vendor-recommended minimum is 4GB RAM; deliberately under-provisioned to
+1.5GB given this box's tight budget — confirmed live it sits at ~1GB
+just idling, so there's very little headroom before a real document
+conversion could OOM-kill it. Watch closely, may need bumping.
 
-```bash
-docker service inspect shared-services_zincsearch \
-  --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep ZINC_FIRST_ADMIN_PASSWORD
-```
-
-Qdrant and ZincSearch also join `public-ingress` now (previously
-app-mesh only) so Nginx can reach their admin UIs — access is still
-fully gated by the oauth2-proxy flow below, this only changes which
-network Nginx uses to *reach* them, not who can resolve/connect to them
-without going through it. Internal backends keep using the service name
-directly on `app-mesh`, unaffected.
-
-Two real dead ends hit wiring up the per-vhost group enforcement,
-documented in full in `config/nginx/conf.d/infra-tools.conf`'s header
-comment — worth reading before changing this file:
-
-1. An nginx `if ($upstream_http_x_auth_request_groups != "...")` check
-   after `auth_request_set` silently 403'd **every** request, including
-   authenticated ones. Nginx's `if` runs in the rewrite phase, which
-   always executes before `auth_request`'s access phase in the same
-   location — the variable is still empty when `if` reads it, regardless
-   of directive order in the file.
-2. `auth_request /oauth2/auth?allowed_groups=x;` (query string inline in
-   the `auth_request` directive itself) doesn't work either — the
-   directive's argument isn't parsed as path+query; it percent-encodes
-   the literal `?` into the request path, which oauth2-proxy then just
-   sees as "no allowed_groups filter, only check authentication."
-
-The fix that actually works: a **dedicated, non-shared** `/oauth2/auth`
-location per vhost, with `allowed_groups=<tool>-admins` baked directly
-into that location's own `proxy_pass` target. oauth2-proxy's
-`authOnlyAuthorize`/`checkAllowedGroups` (confirmed by reading
-`oauthproxy.go` — built specifically "for use with Nginx subrequest
-architectures") then does the real group check server-side and returns
-403 for authenticated-but-wrong-group, 401 for unauthenticated — no
-nginx-side conditional logic needed at all.
-
-Also confirmed live: the env var for `--trusted-proxy-ip` (added to stop
-`--reverse-proxy` trusting `X-Forwarded-*` from any IP) is
-`OAUTH2_PROXY_TRUSTED_PROXY_IPS` — **plural**, matching the Go struct's
-`cfg:"trusted_proxy_ips"` tag, not the singular flag name. The singular
-form is silently ignored.
-
-pgAdmin's own `config_local.py` gets `OAUTH2_ADDITIONAL_CLAIMS =
-{'groups': ['pgadmin-admins']}` added — a real second gate (confirmed by
-reading pgAdmin's `oauth2.py`), not just documentation, on top of the
-pre-provisioned-username check from earlier in this phase. The old
-`suhacb@suhac.eu` pgAdmin account from that step is now permanently
-unusable (not a member of `pgadmin-admins`) and was deleted; the new
-dedicated account's pgAdmin record needs the same manual
-`add-external-user` step:
-
-```bash
-docker exec <data_pgadmin container> /venv/bin/python3 /pgadmin4/setup.py \
-  add-external-user <new-username>@suhac.eu --auth-source oauth2 --email <new-username>@suhac.eu --admin --active
-```
-
-Three new DNS entries needed (same wildcard cert, no new cert work):
-`qdrant.suhac.eu`, `zinc.suhac.eu`, `garage.suhac.eu`.
+Has a real shell and runs as root by default (unlike Qdrant/ZincSearch/
+Garage above) — the ordinary entrypoint-wrapper secret pattern applies
+with no workaround needed. The actual JWT secret value, if you need it
+again, is only retrievable from the running container (Docker secrets
+are write-only) — e.g. `docker exec <container> grep -A2 '"outbox"'
+/etc/onlyoffice/documentserver/local.json`, or from `/proc/1/environ`.
 
 ### Known limitations
 
@@ -934,7 +884,3 @@ Three new DNS entries needed (same wildcard cert, no new cert work):
   no data loss (bind-mounted volume, unaffected by the image swap), but
   worth knowing before redeploying this file again — any future digest
   drift will do the same thing.
-- **`garage-webui` is a third-party community project** (`khairul169/
-  garage-webui`), not maintained by the Garage team — Garage itself ships
-  no web GUI at all, by design. Used here on explicit instruction; worth
-  keeping an eye on for maintenance activity over time.

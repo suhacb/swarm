@@ -3,14 +3,24 @@
 # object storage, rather than a dedicated instance each (same reasoning as
 # the shared Postgres server in data-stack.yml).
 #
-# Qdrant/ZincSearch join public-ingress too (in addition to app-mesh) so
-# Nginx can reverse-proxy their admin UIs at qdrant.suhac.eu/zinc.suhac.eu
-# — gated by oauth2-proxy below, not left open. None of them have native
-# OIDC support (unlike pgAdmin), hence the shared gatekeeper. Internal
-# backends (e.g. princess) still reach them directly via app-mesh/service
-# name — public-ingress membership doesn't change that path at all.
-# Garage itself (the S3 engine) stays app-mesh only; only its web UI
-# (garage-webui, below) needs public-ingress.
+# app-mesh ONLY for all three — no public hostnames, no admin UIs exposed
+# at all. A Keycloak+oauth2-proxy gate for Qdrant/ZincSearch/garage-webui's
+# admin UIs was built, tested, and then deliberately reverted: LAN-only
+# access (the original ask) is impossible on this Docker Desktop for Mac
+# host regardless of what auth sits behind it (its VM-boundary NAT rewrites
+# every client's source IP before any container sees it — this is a
+# network-layer fact, not an auth-layer one, so removing Keycloak doesn't
+# sidestep it either). Once "reachable from the whole internet, gated by
+# login" was the only real option, native logins turned out not to exist
+# for two of the three services (Qdrant only supports an API key, not an
+# interactive login; garage-webui has no built-in auth at all) — so the
+# simplest, actually-secure answer was to just not expose any of them
+# externally: internal network membership alone (never joining
+# public-ingress) is a real boundary here, unlike LAN-vs-WAN IP detection.
+# garage-webui itself was removed entirely as a result — no external
+# access point left to justify running it. Princess (or any other internal
+# backend) still reaches all three directly via app-mesh/service name,
+# unaffected by any of this.
 #
 # Naming convention (enforced by the CONSUMING app's own config, not by
 # anything server-side except Garage's bucket/key scoping — see
@@ -23,42 +33,24 @@
 #   - Qdrant collections: princess_*, staging_princess_*, e2e_princess_*, test_princess_*
 #   - ZincSearch indices: same prefix pattern as Qdrant
 #
-# NEITHER zincsearch, garage, NOR oauth2-proxy's images have a shell
-# (confirmed live — all are minimal Go/Rust static-binary images, no
-# /bin/sh, no busybox). That rules out the entrypoint-wrapper trick used
-# elsewhere in this repo (Keycloak/GitLab) to turn a mounted Docker
-# secret file into an env var, AND rules out CMD-SHELL healthchecks
-# (which also need a shell). See docs/DEPLOY.md's Phase 3 section for how
-# each service's credentials are actually delivered instead — oauth2-proxy
-# is the easy case: it has native --client-secret-file/--cookie-secret-file
-# flags, no workaround needed at all.
-#
-# Access model for the admin UIs (qdrant/zinc/garage-webui): ONE shared
-# oauth2-proxy instance authenticates against Keycloak; each vhost in
-# config/nginx/conf.d/infra-tools.conf enforces its OWN required group
-# via oauth2-proxy's per-request `allowed_groups` query param on the
-# auth_request URI (checked inside oauth2-proxy itself, purpose-built
-# for this Nginx-subrequest pattern) — deliberately not this proxy's own
-# global --allowed-group (which would be one shared group for all three,
-# not per-tool isolation), and NOT an nginx-side `if` on the
-# X-Auth-Request-Groups header (tried first — silently 403'd every
-# request due to nginx's if-runs-before-auth_request phase ordering, see
-# infra-tools.conf's comment for the full story). pgAdmin is the
-# exception: it keeps its own native OIDC from Phase 3, gated the same
-# way via a groups check in its own config instead.
+# NEITHER zincsearch NOR garage's images have a shell (confirmed live —
+# both are minimal Go/Rust static-binary images, no /bin/sh, no busybox).
+# That rules out the entrypoint-wrapper trick used elsewhere in this repo
+# (Keycloak/GitLab) to turn a mounted Docker secret file into an env var,
+# AND rules out CMD-SHELL healthchecks (which also need a shell). See
+# docs/DEPLOY.md's Phase 3 section for how each service's credentials are
+# actually delivered instead.
 #
 # onlyoffice: app-mesh ONLY, deliberately no public-ingress — accessible
 # from inside the swarm only (princess-backend calling it directly via
-# service name), no public hostname, no oauth2-proxy gate needed. Runs as
-# root by default (has bash, unlike Qdrant/ZincSearch/Garage above) —
-# official vendor guidance is 4GB RAM; given this box's tight budget,
-# deliberately under-provisioned to 1.5GB and will need watching under
-# real document-conversion load, not a full sizing guarantee.
+# service name), no public hostname. Runs as root by default (has bash,
+# unlike Qdrant/ZincSearch/Garage above) — official vendor guidance is
+# 4GB RAM; given this box's tight budget, deliberately under-provisioned
+# to 1.5GB and will need watching under real document-conversion load,
+# not a full sizing guarantee.
 #
 # Tracked in https://github.com/suhacb/swarm/issues/8 (supersedes #4).
 networks:
-  public-ingress:
-    external: true
   app-mesh:
     external: true
 
@@ -67,16 +59,11 @@ secrets:
     external: true
   onlyoffice_jwt_secret:
     external: true
-  oauth2_proxy_client_secret:
-    external: true
-  oauth2_proxy_cookie_secret:
-    external: true
 
 services:
   qdrant:
     image: qdrant/qdrant:v1.13.3
     networks:
-      - public-ingress
       - app-mesh
     volumes:
       - /opt/swarm-data/qdrant:/qdrant/storage
@@ -106,7 +93,6 @@ services:
   zincsearch:
     image: public.ecr.aws/zinclabs/zincsearch:0.4.10
     networks:
-      - public-ingress
       - app-mesh
     environment:
       ZINC_FIRST_ADMIN_USER: admin
@@ -164,100 +150,6 @@ services:
         constraints:
           - node.role == manager
 
-  garage-webui:
-    # Third-party community project (not maintained by the Garage team) —
-    # Garage itself deliberately ships no web GUI. Flagged, proceeding on
-    # explicit instruction.
-    image: khairul169/garage-webui:latest
-    networks:
-      - public-ingress
-      - app-mesh
-    environment:
-      API_BASE_URL: "http://garage:3903"
-      S3_ENDPOINT_URL: "http://garage:3900"
-    volumes:
-      # Same rendered config Garage itself uses (has the admin_token
-      # garage-webui needs) — read-only, matches the project's own
-      # documented docker-compose example.
-      - /opt/swarm-data/garage/garage.toml:/etc/garage.toml:ro
-    deploy:
-      mode: replicated
-      replicas: 1
-      resources:
-        limits:
-          memory: 150M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-      placement:
-        constraints:
-          - node.role == manager
-
-  oauth2-proxy:
-    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
-    networks:
-      - public-ingress
-      - app-mesh
-    secrets:
-      - oauth2_proxy_client_secret
-      - oauth2_proxy_cookie_secret
-    environment:
-      OAUTH2_PROXY_PROVIDER: keycloak-oidc
-      OAUTH2_PROXY_OIDC_ISSUER_URL: https://keycloak.suhac.eu/realms/suhacb
-      OAUTH2_PROXY_CLIENT_ID: oauth2-proxy
-      OAUTH2_PROXY_CLIENT_SECRET_FILE: /run/secrets/oauth2_proxy_client_secret
-      OAUTH2_PROXY_COOKIE_SECRET_FILE: /run/secrets/oauth2_proxy_cookie_secret
-      # No shell in this image (confirmed live) — unlike Garage/ZincSearch,
-      # not an issue here at all: oauth2-proxy has native *_FILE flags for
-      # both secrets, so no entrypoint wrapper is needed in the first
-      # place.
-      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
-      OAUTH2_PROXY_UPSTREAMS: "static://202"
-      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
-      OAUTH2_PROXY_REVERSE_PROXY: "true"
-      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
-      OAUTH2_PROXY_OIDC_GROUPS_CLAIM: groups
-      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
-      # Deliberately NOT setting OAUTH2_PROXY_ALLOWED_GROUPS: this proxy
-      # only authenticates (any suhacb-realm user gets a session); Nginx
-      # is what authorizes, per-vhost, off the X-Auth-Request-Groups
-      # header this flag causes oauth2-proxy to return — see
-      # config/nginx/conf.d/infra-tools.conf.
-      #
-      # Deliberately NOT setting OAUTH2_PROXY_COOKIE_DOMAINS: originally
-      # shared across all three hostnames for convenience (log in once),
-      # but that turned out to be actively counterproductive here —
-      # confirmed live: with three DIFFERENT dedicated accounts meant for
-      # three DIFFERENT tools, a shared cookie means whichever account
-      # authenticates first silently sticks for its whole 168h lifetime
-      # across all three, and killing the Keycloak SSO session does NOT
-      # clear it either (it's oauth2-proxy's own separate cookie/session,
-      # confirmed by testing — only /oauth2/sign_out does). Leaving this
-      # unset makes oauth2-proxy default to a cookie scoped to the exact
-      # request host, so each tool always gets its own independent
-      # session tied to its own dedicated account, no bleed-through.
-      # --reverse-proxy trusts X-Forwarded-* headers from ANY IP by
-      # default (confirmed live — oauth2-proxy warns about this on
-      # startup) — only Nginx should ever be able to set those. Scoped to
-      # the two overlay networks this service is actually on, not just
-      # left wide open. NOTE the env var is _IPS (plural, matching the
-      # Go struct's `cfg:"trusted_proxy_ips"` tag) — the singular
-      # OAUTH2_PROXY_TRUSTED_PROXY_IP (matching the --trusted-proxy-ip
-      # flag name) is silently ignored, confirmed live.
-      OAUTH2_PROXY_TRUSTED_PROXY_IPS: "10.0.1.0/24,10.0.2.0/24"
-    deploy:
-      mode: replicated
-      replicas: 1
-      resources:
-        limits:
-          memory: 100M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-      placement:
-        constraints:
-          - node.role == manager
-
   onlyoffice:
     image: onlyoffice/documentserver:latest
     networks:
@@ -267,8 +159,8 @@ services:
     environment:
       JWT_ENABLED: "true"
     # Has a real shell (confirmed live) and runs as root by default,
-    # unlike Qdrant/ZincSearch/Garage/oauth2-proxy above — the ordinary
-    # entrypoint-wrapper pattern applies here with no workaround needed.
+    # unlike Qdrant/ZincSearch/Garage above — the ordinary entrypoint-
+    # wrapper pattern applies here with no workaround needed.
     entrypoint: ["/bin/bash", "-c"]
     command:
       - >
