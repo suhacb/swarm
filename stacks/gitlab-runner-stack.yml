@@ -8,6 +8,27 @@
 # registry.suhac.eu for both the manager and every job container to resolve,
 # and job containers reach it via docker.network_mode below, not by joining
 # any Swarm service network.
+#
+# TWO [[runners]] blocks live in the one persisted config.toml (added
+# 2026-07-14, not scripted in this file's bootstrap command below — that
+# only registers the FIRST block if config.toml doesn't exist yet):
+#   - tags: docker, swarm-homelab — the original runner, NO docker.sock in
+#     its own [runners.docker].volumes. Used by ordinary test/build jobs
+#     (e.g. princess_backend's `composer install` + test suite). Job
+#     containers here have zero host Docker access, on purpose — a
+#     compromised/malicious dependency pulled in by a test job has no path
+#     to the swarm host.
+#   - tags: swarm-deploy — project-scoped to princess_backend (id=42), DOES
+#     have docker.sock mounted into its job containers, so `docker service
+#     update ...` can reach the swarm manager. Only jobs explicitly tagged
+#     `swarm-deploy` in .gitlab-ci.yml get this access. See docs/DEPLOY.md.
+# If /opt/swarm-data/gitlab-runner/config is ever lost, re-register both:
+# the first via this file's own bootstrap command, the second via
+# `POST /api/v4/user/runners` (runner_type=project_type, project_id=42,
+# tag_list=swarm-deploy, run_untagged=false, locked=true) followed by
+# `gitlab-runner register` with the returned token (no --tag-list/--locked
+# flags — those are server-side now with the glrt- token flow), then strip
+# docker.sock from the first block's volumes the same way.
 networks:
   ci-mesh:
     external: true

@@ -1,16 +1,31 @@
-# princess: Angular SPA + Laravel API, prod + staging. This stack is
-# correct in SHAPE but its `docker stack deploy` will fail-to-pull until
-# the princess team's own GitLab project pushes real images to
-# registry.suhac.eu — that's an expected gap, not a bug to chase (see
-# docs/DEPLOY.md's Phase 3 section). Image path and a few env var names
-# below are placeholders pending their actual GitLab group/project path
-# and app config keys — search for "ADJUST" to find them.
+# princess: Angular SPA (separate princess_frontend repo, id=75) + Laravel
+# API (princess_backend repo, id=42), prod + staging. Real images now exist
+# for princess_backend (see docs/DEPLOY.md); princess_frontend's own images
+# don't yet, so those two services will still fail-to-pull until that
+# repo's own pipeline exists — expected gap, not a bug to chase.
 #
-# Networking: backends need public-ingress (Nginx's /api/* split),
-# app-mesh (Keycloak, Garage, Qdrant, ZincSearch), and data-mesh
-# (Postgres). Frontends need public-ingress only — the browser talks to
-# both frontend and backend directly; neither container talks to the
-# other, so the frontend never needs app-mesh/data-mesh at all.
+# princess_backend ships as TWO images (docker/nginx + docker/php in their
+# repo), not one — nginx speaks HTTP, php-fpm speaks FastCGI only. This
+# stack therefore has THREE princess_backend-related services per
+# environment, not two:
+#   - princess-backend(-staging): their nginx image. This is the thing
+#     config/nginx/conf.d/princess.conf's `location ^~ /api/` block
+#     already proxies to (apps_princess-backend:80) — matches with zero
+#     changes needed there. public-ingress (swarm Nginx reaches it) +
+#     app-mesh (it reaches php-fpm over FastCGI). No app secrets — it's
+#     just a reverse proxy, the Laravel app config lives one hop further
+#     in.
+#   - princess-backend-fpm(-staging): their php image (php-fpm). Purely
+#     internal — app-mesh (Keycloak/Garage/Qdrant/ZincSearch, and reached
+#     BY the nginx service above) + data-mesh (Postgres). Deliberately
+#     NOT on public-ingress: nothing external should ever reach php-fpm
+#     directly, and it doesn't speak HTTP anyway.
+#   - princess-frontend(-staging): the separate Angular SPA. public-ingress
+#     only — the browser talks to it directly, and swarm Nginx's `location
+#     /` block proxies to it. Do NOT let princess_backend's own pipeline
+#     deploy anything here — this name is reserved for the id=75 repo.
+#     (This used to collide: princess_backend's deploy was targeting this
+#     exact name with its OWN nginx image before the fix below.)
 #
 # E2E has no separate deployment: the frontend's E2E suite hits the
 # staging backend with an X-E2E-Token header, and the app's own
@@ -42,10 +57,44 @@ secrets:
 
 services:
   princess-backend:
-    # ADJUST: real GitLab group/project path once created.
-    image: registry.suhac.eu/princess/princess_backend:latest
+    # Their nginx image — the HTTP-speaking half. Real registry path
+    # (project id=42's own CI pushes here); tag left at :latest as the
+    # bootstrap value only — their deploy job overwrites this with an
+    # immutable main-<short-sha> tag on every real deploy.
+    image: registry.suhac.eu/suhacb/princess_backend/nginx:latest
     networks:
       - public-ingress
+      - app-mesh
+    environment:
+      # Their own nginx.conf needs to fastcgi_pass here — coordinate the
+      # exact expected env var name with the princess_backend team if
+      # their config doesn't already read this one.
+      PHP_FPM_HOST: princess-backend-fpm:9000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  princess-backend-fpm:
+    # Their php-fpm image — internal only, no public-ingress. Everything
+    # that used to live on the combined "princess-backend" service (DB,
+    # OIDC, Garage, Qdrant, Zinc) belongs here now, not on the nginx half.
+    image: registry.suhac.eu/suhacb/princess_backend/php:latest
+    networks:
       - app-mesh
       - data-mesh
     environment:
@@ -70,6 +119,33 @@ services:
       - princess_garage_key_id
       - princess_garage_secret_key
       - zincsearch_admin_password
+    # No healthcheck: confirmed live their image has no /bin/bash (Alpine-
+    # based), and a guessed-wrong healthcheck actively caused Swarm to kill
+    # and reschedule an otherwise-healthy, ready-to-serve php-fpm process 5
+    # times in ~90s (5 straight OCI exec failures -> marked unhealthy ->
+    # rescheduled). Same "no shell/tools to probe with" situation as
+    # Garage/ZincSearch elsewhere in this repo — restart_policy below
+    # covers a genuine crash without a healthcheck actively fighting it.
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 448M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  princess-backend-staging:
+    image: registry.suhac.eu/suhacb/princess_backend/nginx:latest
+    networks:
+      - public-ingress
+      - app-mesh
+    environment:
+      PHP_FPM_HOST: princess-backend-fpm-staging:9000
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/api/health"]
       interval: 15s
@@ -81,7 +157,7 @@ services:
       replicas: 1
       resources:
         limits:
-          memory: 512M
+          memory: 64M
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -89,10 +165,9 @@ services:
         constraints:
           - node.role == manager
 
-  princess-backend-staging:
-    image: registry.suhac.eu/princess/princess_backend:latest
+  princess-backend-fpm-staging:
+    image: registry.suhac.eu/suhacb/princess_backend/php:latest
     networks:
-      - public-ingress
       - app-mesh
       - data-mesh
     environment:
@@ -120,18 +195,15 @@ services:
       - princess_garage_key_id
       - princess_garage_secret_key
       - zincsearch_admin_password
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/api/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+    # No healthcheck: see princess-backend-fpm's comment above — their
+    # image has no /bin/bash, and this exact test killed this service
+    # live before the fix was applied here too.
     deploy:
       mode: replicated
       replicas: 1
       resources:
         limits:
-          memory: 384M
+          memory: 320M
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -140,7 +212,7 @@ services:
           - node.role == manager
 
   princess-frontend:
-    image: registry.suhac.eu/princess/princess_frontend:latest
+    image: registry.suhac.eu/suhacb/princess_frontend:latest
     networks:
       - public-ingress
     healthcheck:
@@ -163,7 +235,7 @@ services:
           - node.role == manager
 
   princess-frontend-staging:
-    image: registry.suhac.eu/princess/princess_frontend:latest
+    image: registry.suhac.eu/suhacb/princess_frontend:latest
     networks:
       - public-ingress
     healthcheck:

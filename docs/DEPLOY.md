@@ -778,22 +778,46 @@ path in the stack file to match, then deploy.
 ### 7. CI/CD deploy trigger
 
 Lives entirely in the princess team's own `.gitlab-ci.yml`, not in this
-repo — their runner job containers already reach the host Docker daemon
-(the same `gitlab-runner` from Phase 2b, `docker.sock` already mounted, no
-change needed here), so a deploy stage is just:
+repo — their runner job containers already reach the host Docker daemon,
+so a deploy stage is just:
 
 ```yaml
 deploy:
   stage: deploy
   image: docker:24-cli
-  tags: [docker]
+  tags: [swarm-deploy]
   script:
-    - docker service update --image "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" apps_princess-backend
+    - docker service update --with-registry-auth --image "$CI_REGISTRY_IMAGE/nginx:$CI_COMMIT_SHORT_SHA" apps_princess-backend
+    - docker service update --with-registry-auth --image "$CI_REGISTRY_IMAGE/php:$CI_COMMIT_SHORT_SHA" apps_princess-backend-fpm
 ```
 
 No SSH keypair, no webhook endpoint needed — this is strictly less
 infrastructure than either alternative the princess team proposed, for
 the same result, on a single-node swarm.
+
+**Two `docker service update` calls, not one** (updated 2026-07-14, once
+real images existed): princess_backend ships as two images — nginx
+(speaks HTTP, this is what `apps_princess-backend` actually is) and php-fpm
+(FastCGI only, internal-only service `apps_princess-backend-fpm`). See
+`stacks/apps-stack.yml`'s header comment for the full reasoning — this
+replaces an earlier, wrong single-image assumption in this doc from before
+real images existed. **`apps_princess-frontend` is reserved for the
+separate Angular SPA repo (id=75)** — nothing in princess_backend's own
+pipeline should ever deploy to it; that used to be an actual collision
+before this fix.
+
+**Use `tags: [swarm-deploy]`, not `[docker]`, for this job specifically**
+(added 2026-07-14): the runner is now split into two `[[runners]]` blocks
+(see `stacks/gitlab-runner-stack.yml`) so that `docker.sock` — and the
+effectively-root-on-the-host access it grants — is only ever mounted into
+deploy jobs, not into every test/build job. Before the split, `composer
+install` (or any other dependency this project pulls in during its test
+stage) had transitive access to the swarm host via the same shared
+runner; tagging ordinary jobs `[docker]` and only the deploy job
+`[swarm-deploy]` closes that gap. If a new project ever needs its own
+deploy job, it needs its own `swarm-deploy`-tagged project runner (this
+one is locked to princess_backend) — don't just add more projects to this
+one's tag, that would defeat the point of scoping it per-project.
 
 ### 8. Qdrant/ZincSearch/Garage: internal-only, no admin UI exposed (Keycloak gate tried and reverted)
 
