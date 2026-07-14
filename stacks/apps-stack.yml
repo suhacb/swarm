@@ -10,11 +10,15 @@
 # environment, not two:
 #   - princess-backend(-staging): their nginx image. This is the thing
 #     config/nginx/conf.d/princess.conf's `location ^~ /api/` block
-#     already proxies to (apps_princess-backend:80) — matches with zero
-#     changes needed there. public-ingress (swarm Nginx reaches it) +
-#     app-mesh (it reaches php-fpm over FastCGI). No app secrets — it's
-#     just a reverse proxy, the Laravel app config lives one hop further
-#     in.
+#     proxies to, at apps_princess-backend:8080 — their nginx.conf
+#     template listens on 8080, not 80 (confirmed live 2026-07-14: a
+#     healthcheck AND princess.conf's proxy_pass both hardcoded :80,
+#     neither ever reached the container at all despite it running
+#     perfectly healthily — see project-nginx-registry-rate-limit memory's
+#     sibling incident for the parallel php-fpm healthcheck mistake).
+#     public-ingress (swarm Nginx reaches it) + app-mesh (it reaches
+#     php-fpm over FastCGI). No app secrets — it's just a reverse proxy,
+#     the Laravel app config lives one hop further in.
 #   - princess-backend-fpm(-staging): their php image (php-fpm). Purely
 #     internal — app-mesh (Keycloak/Garage/Qdrant/ZincSearch, and reached
 #     BY the nginx service above) + data-mesh (Postgres). Deliberately
@@ -71,7 +75,7 @@ services:
       # their config doesn't already read this one.
       PHP_FPM_HOST: princess-backend-fpm:9000
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -147,7 +151,7 @@ services:
     environment:
       PHP_FPM_HOST: princess-backend-fpm-staging:9000
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 15s
       timeout: 5s
       retries: 5
