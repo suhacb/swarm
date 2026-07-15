@@ -46,6 +46,10 @@ networks:
     external: true
 
 secrets:
+  princess_app_key:
+    external: true
+  princess_app_key_staging:
+    external: true
   princess_db_password:
     external: true
   princess_keycloak_client_secret:
@@ -119,6 +123,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
+        export APP_KEY="$$(cat /run/secrets/princess_app_key)" &&
         export DB_PASSWORD="$$(cat /run/secrets/princess_db_password)" &&
         export KEYCLOAK_CLIENT_SECRET="$$(cat /run/secrets/princess_keycloak_client_secret)" &&
         export GARAGE_ACCESS_KEY_ID="$$(cat /run/secrets/princess_garage_key_id)" &&
@@ -134,6 +139,22 @@ services:
       DB_PORT: "5432"
       DB_DATABASE: princess
       DB_USERNAME: princess
+      # SANCTUM_STATEFUL_DOMAINS: no scheme, comma-separated, per their own
+      # .env.example comment — confirmed via config/sanctum.php.
+      SANCTUM_STATEFUL_DOMAINS: princess.suhac.eu
+      # APP_FRONTEND_URL: config/cors.php builds the allowed CORS origin as
+      # literally env('APP_FRONTEND_URL').':'.env('APP_FRONTEND_PORT') — an
+      # unconditional string concatenation. On a standard-port HTTPS origin
+      # (no explicit port, which is what real browsers send in the Origin
+      # header), this ALWAYS produces a trailing ":" or ":<wrong port>" that
+      # can never exactly match — confirmed live 2026-07-15 (backend team
+      # saw "access-control-allow-origin: :" with both vars empty). No
+      # value set here fixes this correctly; it's a code-level bug in
+      # cors.php's string-concatenation approach, not an infra config gap —
+      # flagged back to the backend team rather than worked around here.
+      # Their own .gitlab-ci.yml already defines an unused CORS_ALLOWED_ORIGINS
+      # var that cors.php doesn't read, which may be the intended fix.
+      APP_FRONTEND_URL: https://princess.suhac.eu
       AUTH_DRIVER: keycloak
       KEYCLOAK_BASE_URL: https://keycloak.suhac.eu
       KEYCLOAK_REALM: suhacb
@@ -163,6 +184,7 @@ services:
       ZINC_INDEX_PREFIX: princess
       ZINC_USER: admin
     secrets:
+      - princess_app_key
       - princess_db_password
       - princess_keycloak_client_secret
       - princess_garage_key_id
@@ -226,6 +248,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
+        export APP_KEY="$$(cat /run/secrets/princess_app_key_staging)" &&
         export DB_PASSWORD="$$(cat /run/secrets/princess_db_password)" &&
         export KEYCLOAK_CLIENT_SECRET="$$(cat /run/secrets/princess_test_keycloak_client_secret)" &&
         export GARAGE_ACCESS_KEY_ID="$$(cat /run/secrets/princess_garage_key_id)" &&
@@ -241,6 +264,11 @@ services:
       DB_PORT: "5432"
       DB_DATABASE: stage_princess
       DB_USERNAME: princess
+      # See princess-backend-fpm's comment above re: SANCTUM_STATEFUL_DOMAINS
+      # and APP_FRONTEND_URL / the cors.php string-concatenation bug — same
+      # caveats apply, just the staging hostname.
+      SANCTUM_STATEFUL_DOMAINS: staging.princess.suhac.eu
+      APP_FRONTEND_URL: https://staging.princess.suhac.eu
       AUTH_DRIVER: keycloak
       KEYCLOAK_BASE_URL: https://keycloak.suhac.eu
       KEYCLOAK_REALM: princess-test
@@ -264,6 +292,7 @@ services:
       ZINC_INDEX_PREFIX: staging_princess
       ZINC_USER: admin
     secrets:
+      - princess_app_key_staging
       - princess_db_password
       - princess_test_keycloak_client_secret
       - princess_garage_key_id
