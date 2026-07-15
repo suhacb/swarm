@@ -9,26 +9,50 @@
 # and job containers reach it via docker.network_mode below, not by joining
 # any Swarm service network.
 #
-# TWO [[runners]] blocks live in the one persisted config.toml (added
-# 2026-07-14, not scripted in this file's bootstrap command below — that
-# only registers the FIRST block if config.toml doesn't exist yet):
-#   - tags: docker, swarm-homelab — the original runner, NO docker.sock in
-#     its own [runners.docker].volumes. Used by ordinary test/build jobs
-#     (e.g. princess_backend's `composer install` + test suite). Job
-#     containers here have zero host Docker access, on purpose — a
-#     compromised/malicious dependency pulled in by a test job has no path
-#     to the swarm host.
-#   - tags: swarm-deploy — project-scoped to princess_backend (id=42), DOES
-#     have docker.sock mounted into its job containers, so `docker service
-#     update ...` can reach the swarm manager. Only jobs explicitly tagged
-#     `swarm-deploy` in .gitlab-ci.yml get this access. See docs/DEPLOY.md.
-# If /opt/swarm-data/gitlab-runner/config is ever lost, re-register both:
-# the first via this file's own bootstrap command, the second via
-# `POST /api/v4/user/runners` (runner_type=project_type, project_id=42,
-# tag_list=swarm-deploy, run_untagged=false, locked=true) followed by
-# `gitlab-runner register` with the returned token (no --tag-list/--locked
-# flags — those are server-side now with the glrt- token flow), then strip
-# docker.sock from the first block's volumes the same way.
+# THREE [[runners]] blocks live in the one persisted config.toml (not
+# scripted in this file's bootstrap command below — that only registers
+# the FIRST block if config.toml doesn't exist yet):
+#   - tags: docker, swarm-homelab — the original runner, added 2026-07-14,
+#     NO docker.sock in its own [runners.docker].volumes. Used by ordinary
+#     test/build jobs (e.g. princess_backend's `composer install` + test
+#     suite). Job containers here have zero host Docker access, on
+#     purpose — a compromised/malicious dependency pulled in by a test job
+#     has no path to the swarm host.
+#   - tags: swarm-deploy, project-scoped to princess_backend (id=42),
+#     added 2026-07-14. DOES have docker.sock mounted into its job
+#     containers, so `docker service update ...` can reach the swarm
+#     manager. Only jobs explicitly tagged `swarm-deploy` get this access.
+#   - tags: swarm-deploy, project-scoped to princess_frontend (id=75),
+#     added 2026-07-15 — same shape as princess_backend's, deliberately a
+#     SEPARATE project-locked runner rather than sharing/un-scoping the
+#     backend one, so each project's deploy access stays isolated.
+# See docs/DEPLOY.md for the .gitlab-ci.yml side of this.
+#
+# If /opt/swarm-data/gitlab-runner/config is ever lost, re-register all
+# three: the first via this file's own bootstrap command, each
+# swarm-deploy one via `POST /api/v4/user/runners` (runner_type=
+# project_type, project_id=<theirs>, tag_list=swarm-deploy,
+# run_untagged=false, locked=true) followed by `gitlab-runner register`
+# with the returned token (no --tag-list/--locked flags — those are
+# server-side now with the glrt- token flow), then strip docker.sock from
+# the first block's volumes the same way.
+#
+# IMPORTANT, learned the hard way (2026-07-15): `gitlab-runner register`
+# already reloads the running manager's config on its own — its own
+# output says so ("if it's running already the config should be
+# automatically reloaded"). Do NOT follow it with `docker service update
+# --force gitlab-runner_gitlab-runner` "just to be safe" — that restart
+# sends every in-flight job a graceful-shutdown signal. Hit this live: a
+# princess_frontend job that had been queued 43 minutes (no runner existed
+# yet) got picked up by the newly-registered runner, and the very next
+# moment my "just to be safe" restart killed the manager mid-job. The
+# build itself finished fine (container exited 0, image genuinely
+# pushed), but the job was stuck showing "running" in GitLab forever
+# since the manager never got to report completion — had to cancel +
+# retry it via the API. If verification is needed, check
+# `gitlab-rails runner "Ci::Runner.all..."` / `docker exec ... cat
+# config.toml` — don't restart the whole manager process to "confirm" a
+# config reload that already happened.
 networks:
   ci-mesh:
     external: true
