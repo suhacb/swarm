@@ -56,6 +56,10 @@ secrets:
     external: true
   princess_garage_secret_key:
     external: true
+  garage_admin_token:
+    external: true
+  onlyoffice_jwt_secret:
+    external: true
   zincsearch_admin_password:
     external: true
 
@@ -96,22 +100,63 @@ services:
   princess-backend-fpm:
     # Their php-fpm image — internal only, no public-ingress. Everything
     # that used to live on the combined "princess-backend" service (DB,
-    # OIDC, Garage, Qdrant, Zinc) belongs here now, not on the nginx half.
+    # Keycloak, Garage) belongs here now, not on the nginx half.
     image: registry.suhac.eu/suhacb/princess_backend/php:latest
     networks:
       - app-mesh
       - data-mesh
+    # Their config/database.php etc. read plain env('DB_PASSWORD') and
+    # friends directly — no *_FILE convention, confirmed via their actual
+    # source (config/database.php, .env.example). Confirmed LIVE 2026-07-15
+    # that this was silently broken: DB_PASSWORD was never set as an env
+    # var (only mounted as a secret FILE, which nothing reads), so every
+    # real DB query failed with "no password supplied" despite the app
+    # otherwise looking healthy — /api/health apparently never exercises
+    # the DB. This wrapper translates every secret this app actually reads
+    # into the literal env var it expects, then hands off to their own
+    # entrypoint.sh (which still runs, e.g. config:cache — see their
+    # Dockerfile's own comment on why that can't be baked in at build time).
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        export DB_PASSWORD="$$(cat /run/secrets/princess_db_password)" &&
+        export KEYCLOAK_CLIENT_SECRET="$$(cat /run/secrets/princess_keycloak_client_secret)" &&
+        export GARAGE_ACCESS_KEY_ID="$$(cat /run/secrets/princess_garage_key_id)" &&
+        export GARAGE_SECRET_ACCESS_KEY="$$(cat /run/secrets/princess_garage_secret_key)" &&
+        export GARAGE_ADMIN_TOKEN="$$(cat /run/secrets/garage_admin_token)" &&
+        export ONLYOFFICE_JWT_SECRET="$$(cat /run/secrets/onlyoffice_jwt_secret)" &&
+        exec /usr/local/bin/entrypoint.sh php-fpm -F
     environment:
       APP_ENV: production
+      APP_URL: https://princess.suhac.eu
       DB_CONNECTION: pgsql
       DB_HOST: data_postgres
       DB_PORT: "5432"
       DB_DATABASE: princess
       DB_USERNAME: princess
-      OIDC_ISSUER: https://keycloak.suhac.eu/realms/suhacb
-      OIDC_CLIENT_ID: princess-client
-      GARAGE_ENDPOINT: http://shared-services_garage:3900
-      GARAGE_BUCKET: princess
+      AUTH_DRIVER: keycloak
+      KEYCLOAK_BASE_URL: https://keycloak.suhac.eu
+      KEYCLOAK_REALM: suhacb
+      KEYCLOAK_CLIENT_ID: princess-client
+      KEYCLOAK_REDIRECT_URI: https://princess.suhac.eu/api/auth/callback
+      KEYCLOAK_JWKS_CACHE_TTL: "3600"
+      AWS_ENDPOINT: http://shared-services_garage:3900
+      GARAGE_REGION: garage
+      GARAGE_ADMIN_URL: http://shared-services_garage:3903
+      GARAGE_S3_BUCKET_PREFIX: princess
+      GARAGE_TEMPLATES_BUCKET: princess-templates
+      # GARAGE_PUBLIC_ENDPOINT deliberately left unset — DocumentVersionController
+      # streams through the backend rather than a presigned URL (see docs/DEPLOY.md).
+      ONLYOFFICE_URL: http://shared-services_onlyoffice
+      # ONLYOFFICE_PUBLIC_URL / ONLYOFFICE_CALLBACK_BASE_URL: not set yet —
+      # OnlyOffice has no public hostname (deliberate, internal-only), and
+      # it's not yet decided how document editing is meant to work end-to-end
+      # given that. Needs a decision before this is wired up, not a guess.
+      # QDRANT_*/ZINC_*: NOT in their .env.example's canonical variable
+      # checklist as of 2026-07-15 — currently unused by the app's actual
+      # code as far as confirmed. Left set here in case a future feature
+      # reads them; don't assume vector/full-text search works end-to-end
+      # just because these are present.
       QDRANT_URL: http://shared-services_qdrant:6333
       QDRANT_COLLECTION_PREFIX: princess
       ZINC_URL: http://shared-services_zincsearch:4080
@@ -122,6 +167,8 @@ services:
       - princess_keycloak_client_secret
       - princess_garage_key_id
       - princess_garage_secret_key
+      - garage_admin_token
+      - onlyoffice_jwt_secret
       - zincsearch_admin_password
     # No healthcheck: confirmed live their image has no /bin/bash (Alpine-
     # based), and a guessed-wrong healthcheck actively caused Swarm to kill
@@ -174,20 +221,43 @@ services:
     networks:
       - app-mesh
       - data-mesh
+    # See princess-backend-fpm's comment above for why this wrapper exists:
+    # their app reads plain env vars (DB_PASSWORD etc.), not secret files.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        export DB_PASSWORD="$$(cat /run/secrets/princess_db_password)" &&
+        export KEYCLOAK_CLIENT_SECRET="$$(cat /run/secrets/princess_test_keycloak_client_secret)" &&
+        export GARAGE_ACCESS_KEY_ID="$$(cat /run/secrets/princess_garage_key_id)" &&
+        export GARAGE_SECRET_ACCESS_KEY="$$(cat /run/secrets/princess_garage_secret_key)" &&
+        export GARAGE_ADMIN_TOKEN="$$(cat /run/secrets/garage_admin_token)" &&
+        export ONLYOFFICE_JWT_SECRET="$$(cat /run/secrets/onlyoffice_jwt_secret)" &&
+        exec /usr/local/bin/entrypoint.sh php-fpm -F
     environment:
       APP_ENV: staging
+      APP_URL: https://staging.princess.suhac.eu
       DB_CONNECTION: pgsql
       DB_HOST: data_postgres
       DB_PORT: "5432"
       DB_DATABASE: stage_princess
       DB_USERNAME: princess
-      OIDC_ISSUER: https://keycloak.suhac.eu/realms/princess-test
-      OIDC_CLIENT_ID: princess-client
-      GARAGE_ENDPOINT: http://shared-services_garage:3900
+      AUTH_DRIVER: keycloak
+      KEYCLOAK_BASE_URL: https://keycloak.suhac.eu
+      KEYCLOAK_REALM: princess-test
+      KEYCLOAK_CLIENT_ID: princess-client
+      KEYCLOAK_REDIRECT_URI: https://staging.princess.suhac.eu/api/auth/callback
+      KEYCLOAK_JWKS_CACHE_TTL: "3600"
+      AWS_ENDPOINT: http://shared-services_garage:3900
+      GARAGE_REGION: garage
+      GARAGE_ADMIN_URL: http://shared-services_garage:3903
       # Hyphen, not underscore: Garage enforces S3 bucket-naming rules,
       # which reject underscores — a Garage-only exception to this repo's
       # usual underscore convention (see shared-services-stack.yml).
-      GARAGE_BUCKET: staging-princess
+      GARAGE_S3_BUCKET_PREFIX: staging-princess
+      GARAGE_TEMPLATES_BUCKET: princess-templates
+      ONLYOFFICE_URL: http://shared-services_onlyoffice
+      # See princess-backend-fpm's comment above re: ONLYOFFICE_PUBLIC_URL/
+      # ONLYOFFICE_CALLBACK_BASE_URL and QDRANT_*/ZINC_* — same caveats apply.
       QDRANT_URL: http://shared-services_qdrant:6333
       QDRANT_COLLECTION_PREFIX: staging_princess
       ZINC_URL: http://shared-services_zincsearch:4080
@@ -198,6 +268,8 @@ services:
       - princess_test_keycloak_client_secret
       - princess_garage_key_id
       - princess_garage_secret_key
+      - garage_admin_token
+      - onlyoffice_jwt_secret
       - zincsearch_admin_password
     # No healthcheck: see princess-backend-fpm's comment above — their
     # image has no /bin/bash, and this exact test killed this service
