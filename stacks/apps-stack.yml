@@ -132,6 +132,7 @@ services:
         export ONLYOFFICE_JWT_SECRET="$$(cat /run/secrets/onlyoffice_jwt_secret)" &&
         exec /usr/local/bin/entrypoint.sh php-fpm -F
     environment:
+      APP_NAME: princess_backend
       APP_ENV: production
       APP_URL: https://princess.suhac.eu
       DB_CONNECTION: pgsql
@@ -257,6 +258,7 @@ services:
         export ONLYOFFICE_JWT_SECRET="$$(cat /run/secrets/onlyoffice_jwt_secret)" &&
         exec /usr/local/bin/entrypoint.sh php-fpm -F
     environment:
+      APP_NAME: princess_backend
       APP_ENV: staging
       APP_URL: https://staging.princess.suhac.eu
       DB_CONNECTION: pgsql
