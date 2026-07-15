@@ -220,7 +220,7 @@ services:
     networks:
       - public-ingress
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -243,7 +243,7 @@ services:
     networks:
       - public-ingress
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
       interval: 15s
       timeout: 5s
       retries: 5
