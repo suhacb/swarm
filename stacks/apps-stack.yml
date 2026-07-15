@@ -170,10 +170,16 @@ services:
       # GARAGE_PUBLIC_ENDPOINT deliberately left unset — DocumentVersionController
       # streams through the backend rather than a presigned URL (see docs/DEPLOY.md).
       ONLYOFFICE_URL: http://shared-services_onlyoffice
-      # ONLYOFFICE_PUBLIC_URL / ONLYOFFICE_CALLBACK_BASE_URL: not set yet —
-      # OnlyOffice has no public hostname (deliberate, internal-only), and
-      # it's not yet decided how document editing is meant to work end-to-end
-      # given that. Needs a decision before this is wired up, not a guess.
+      # OnlyOffice given a real public hostname 2026-07-15 (reversed the
+      # earlier "internal-only" decision — see shared-services-stack.yml's
+      # onlyoffice service comment for why). ONLYOFFICE_PUBLIC_URL is what
+      # the BROWSER loads the editor from; ONLYOFFICE_CALLBACK_BASE_URL is
+      # what OnlyOffice's own server calls back into on save — that has to
+      # be princess-backend's HTTP-speaking nginx half (port 8080), not the
+      # fpm service, since php-fpm only speaks FastCGI and OnlyOffice's
+      # callback is a plain HTTP POST.
+      ONLYOFFICE_PUBLIC_URL: https://onlyoffice.suhac.eu
+      ONLYOFFICE_CALLBACK_BASE_URL: http://princess-backend:8080
       # QDRANT_*/ZINC_*: NOT in their .env.example's canonical variable
       # checklist as of 2026-07-15 — currently unused by the app's actual
       # code as far as confirmed. Left set here in case a future feature
@@ -286,8 +292,12 @@ services:
       GARAGE_S3_BUCKET_PREFIX: staging-princess
       GARAGE_TEMPLATES_BUCKET: princess-templates
       ONLYOFFICE_URL: http://shared-services_onlyoffice
-      # See princess-backend-fpm's comment above re: ONLYOFFICE_PUBLIC_URL/
-      # ONLYOFFICE_CALLBACK_BASE_URL and QDRANT_*/ZINC_* — same caveats apply.
+      # See princess-backend-fpm's comment above re: OnlyOffice's public
+      # hostname decision — same URL for both environments (one shared
+      # Document Server), but the callback target is staging's own nginx.
+      ONLYOFFICE_PUBLIC_URL: https://onlyoffice.suhac.eu
+      ONLYOFFICE_CALLBACK_BASE_URL: http://princess-backend-staging:8080
+      # QDRANT_*/ZINC_* — same caveats apply as princess-backend-fpm above.
       QDRANT_URL: http://shared-services_qdrant:6333
       QDRANT_COLLECTION_PREFIX: staging_princess
       ZINC_URL: http://shared-services_zincsearch:4080

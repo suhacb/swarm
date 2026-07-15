@@ -65,6 +65,8 @@ networks:
     external: true
   ci-mesh:
     external: true
+  public-ingress:
+    external: true
 
 secrets:
   zincsearch_admin_password:
@@ -175,8 +177,19 @@ services:
 
   onlyoffice:
     image: onlyoffice/documentserver:9.4.0
+    # public-ingress added 2026-07-15: reversed the original "internal-only"
+    # decision once it turned out to be wrong for this service specifically.
+    # OnlyOffice's editor isn't a backend-only admin tool like Qdrant/Zinc/
+    # Garage (the original reasoning this borrowed from) — the browser needs
+    # a live connection directly to the Document Server (api.js load +
+    # WebSocket for real-time collaboration/autosave), so it structurally
+    # cannot work without public reachability. JWT_ENABLED below is the real
+    # access boundary, same trust model as registry.suhac.eu: "public" here
+    # doesn't mean unauthenticated, every meaningful request still needs a
+    # valid signed token.
     networks:
       - app-mesh
+      - public-ingress
     secrets:
       - onlyoffice_jwt_secret
     environment:
