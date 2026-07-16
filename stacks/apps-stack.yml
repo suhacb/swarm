@@ -94,6 +94,14 @@ services:
       resources:
         limits:
           memory: 64M
+      # start-first: without this, Swarm's default (stop-first) briefly has
+      # ZERO healthy replicas mid-deploy on a single-replica service — a
+      # real user-visible gap on every deploy, not just a theoretical one.
+      # Starts the new task, waits for it to pass its healthcheck, THEN
+      # stops the old one.
+      update_config:
+        order: start-first
+        failure_action: rollback
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -212,6 +220,14 @@ services:
       resources:
         limits:
           memory: 448M
+      # See princess-backend's comment above re: start-first. No
+      # healthcheck on this service (see above), so Swarm falls back to
+      # "task running" rather than a real readiness check for the
+      # start-first handoff — still strictly better than stop-first's
+      # guaranteed gap, just not as precise as the nginx half's.
+      update_config:
+        order: start-first
+        failure_action: rollback
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -238,6 +254,9 @@ services:
       resources:
         limits:
           memory: 64M
+      update_config:
+        order: start-first
+        failure_action: rollback
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -321,6 +340,9 @@ services:
       resources:
         limits:
           memory: 320M
+      update_config:
+        order: start-first
+        failure_action: rollback
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -344,6 +366,9 @@ services:
       resources:
         limits:
           memory: 64M
+      update_config:
+        order: start-first
+        failure_action: rollback
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -367,6 +392,9 @@ services:
       resources:
         limits:
           memory: 64M
+      update_config:
+        order: start-first
+        failure_action: rollback
       restart_policy:
         condition: on-failure
         delay: 10s
