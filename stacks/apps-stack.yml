@@ -329,10 +329,13 @@ services:
       AWS_ENDPOINT: http://shared-services_garage:3900
       GARAGE_REGION: garage
       GARAGE_ADMIN_URL: http://shared-services_garage:3903
-      # Hyphen, not underscore: Garage enforces S3 bucket-naming rules,
-      # which reject underscores — a Garage-only exception to this repo's
-      # usual underscore convention (see shared-services-stack.yml).
-      GARAGE_S3_BUCKET_PREFIX: staging-princess
+      # e2e-princess, not staging-princess (changed 2026-07-16, FE-CI-04):
+      # staging is now automated-E2E-only, no other traffic left that
+      # would need the old staging-princess bucket specifically. This is
+      # also required for E2eController::resetStorage()'s safety guard to
+      # ever actually run — see docs/DEPLOY.md's E2E section for the full
+      # story on that guard's own prefix-order bug, not fixed here.
+      GARAGE_S3_BUCKET_PREFIX: e2e-princess
       GARAGE_TEMPLATES_BUCKET: princess-templates
       ONLYOFFICE_URL: http://shared-services_onlyoffice
       # See princess-backend-fpm's comment above re: OnlyOffice's public

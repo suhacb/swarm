@@ -1039,6 +1039,23 @@ orchestrates the full build→deploy→E2E→promote→scale-down sequence
 a frontend/backend coordination question, not an infra one** — this repo
 just needs the targets to exist and be deployable, which they now are.
 
+**Staging's Garage prefix: `e2e-princess`, not `staging-princess`.** Under
+this topology staging is automated-E2E-only, so its `GARAGE_S3_BUCKET_PREFIX`
+was changed (2026-07-16) from `staging-princess` to the pre-existing
+`e2e-princess` bucket — no new bucket created. This was flagged back by the
+backend team as an infra task ("needs to change to a princess-e2e-prefixed
+value"), but the fix actually needed is the opposite: `E2eController::
+resetStorage()`'s own safety guard checks
+`str_starts_with($prefix, 'princess-e2e')`, which is backwards relative to
+every real bucket name in this repo (`e2e-princess`, `staging-princess`,
+`uat-princess` — env-prefix always comes first, per the naming convention
+documented in `shared-services-stack.yml`). Pointing staging at a bucket
+actually named `princess-e2e-*` would have been the one inconsistent bucket
+in the whole system just to match a backwards guard. Until the backend fixes
+that one line to `str_starts_with($prefix, 'e2e-princess')`, the guard will
+keep bailing out and the storage half of `/api/e2e/reset` will keep silently
+no-op'ing — the env var alone can't fix this, it's a one-line app-side fix.
+
 ### Known limitations
 
 - **Memory is tight.** Current service memory *limits* already summed to
