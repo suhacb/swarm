@@ -20,6 +20,7 @@ services:
           - gitlab.suhac.eu
           - princess.suhac.eu
           - staging.princess.suhac.eu
+          - test.princess.suhac.eu
           - pg.suhac.eu
           - onlyoffice.suhac.eu
       ci-mesh:

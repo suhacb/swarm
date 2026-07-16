@@ -882,7 +882,15 @@ again, is only retrievable from the running container (Docker secrets
 are write-only) — e.g. `docker exec <container> grep -A2 '"outbox"'
 /etc/onlyoffice/documentserver/local.json`, or from `/proc/1/environ`.
 
-### E2E: fully GitLab-CI-driven, never touches `staging`
+### E2E: fully GitLab-CI-driven (original design; superseded 2026-07-16, see below)
+
+**Superseded 2026-07-16 (FE-CI-04)**: `staging` stopped being a human-QA
+environment — the paragraph below describing "never touches staging"
+described a topology that no longer exists. See "Automated E2E on
+staging + `test.princess`" further down for the current design. The
+`e2e_princess` isolation mechanism itself (X-E2E-Token header,
+`E2eAuth` middleware) is unchanged and still exactly as described here —
+only *which* deployment E2E is allowed to touch changed.
 
 Decided with the princess team (2026-07-13, revised same day after an
 initial version that would have deployed MR builds onto `staging` — see
@@ -927,6 +935,109 @@ objects through `princess-backend` itself rather than redirecting to a
 presigned Garage URL. `GARAGE_PUBLIC_ENDPOINT` stays permanently blank
 as a result — not a placeholder pending a decision, that decision is
 now made.
+
+### Automated E2E on staging + `test.princess.suhac.eu` (FE-CI-04, 2026-07-16)
+
+New topology, filed by the frontend team alongside `docs/e2e-backend-
+requirements.md` (their repo, not this one): `staging.princess.suhac.eu`
+becomes automated-E2E-only, no human testers. The persistent, human-
+facing QA environment moves to a new hostname, `test.princess.suhac.eu`
+— same idea the earlier "UAT" naming meant, just renamed. This is a
+coherent evolution of the E2E design above, not a contradiction of it:
+"E2E never touches staging" existed specifically to protect staging's
+human-QA stability; once staging stops being human-facing, that
+protection has nothing left to protect, so it's safe to now deploy each
+merge to staging and run E2E directly against it. The `e2e_princess`
+isolation itself (X-E2E-Token header, `E2eAuth` middleware) is
+unchanged — confirmed explicitly (2026-07-16) — staging's own
+`stage_princess` database still never gets touched by automated runs.
+
+**New services, live**: `apps_princess-frontend-test`,
+`apps_princess-backend-test`, `apps_princess-backend-test-fpm` — same
+shape as their staging equivalents (nginx + php-fpm split, see `apps-
+stack.yml`'s header comment). Routed via `test.princess.suhac.eu` in
+`princess.conf`, same path-priority `/api/*` split as every other
+princess hostname. No new certificate needed — `test.princess.suhac.eu`
+is one level under `princess.suhac.eu`, already covered by the existing
+`*.princess.suhac.eu` wildcard SAN. **DNS still needs a real A record**
+pointing at this swarm — not provisioned by this repo, same as every
+other hostname here.
+
+**Resource naming: `uat_`/`uat-`, not `test_`/`test-`.** The hostname
+says "test" but the backing resources say "uat", deliberately —
+`test_princess` already exists as princess_backend's own CI/PHPUnit
+database (a completely different, ephemeral-per-CI-run thing), and
+reusing that name for a persistent QA environment's data would be a
+real collision waiting to happen. Provisioned:
+- Postgres: `uat_princess` database, owned by the existing shared
+  `princess` role (same role/password as every other princess
+  database — no new credential).
+- Garage: `uat-princess` bucket (hyphen, matching this repo's
+  Garage-specific naming exception), access granted to the existing
+  `princess` scoped key (no new key).
+- `QDRANT_COLLECTION_PREFIX`/`ZINC_INDEX_PREFIX`: `uat_princess` — set
+  for consistency, same caveat as staging/prod: not confirmed actually
+  read by the app as of the last `.env.example` cross-reference.
+
+**Keycloak: one shared client, two redirect URIs, not two clients.**
+`princess-client` in the `princess-test` realm now has both
+`https://staging.princess.suhac.eu/*` and
+`https://test.princess.suhac.eu/*` registered as valid redirect URIs.
+Same realm, same 11 test users, same client secret
+(`princess_test_keycloak_client_secret`) for both — no new Keycloak
+client, no new secret.
+
+**Staging lifecycle: scale down after promotion, scale up (and wait)
+before the next run.** To avoid paying for staging's app-container
+memory between pipeline runs:
+
+```bash
+# After a successful promote_test step:
+docker service scale apps_princess-backend-staging=0 \
+  apps_princess-backend-fpm-staging=0 apps_princess-frontend-staging=0
+
+# At the start of the next pipeline run, before E2E fires a single
+# request — scale up AND wait for a real healthcheck pass, not just
+# "task running". `docker service scale` returns as soon as the task is
+# scheduled, not once it's healthy; firing E2E traffic immediately
+# after would hit a container still mid-boot.
+docker service scale apps_princess-backend-staging=1 \
+  apps_princess-backend-fpm-staging=1 apps_princess-frontend-staging=1
+
+until [ "$(docker service inspect apps_princess-backend-staging \
+  --format '{{.ServiceStatus.RunningTasks}}')" = "1" ]; do sleep 2; done
+# Repeat the same wait for -fpm-staging and -frontend-staging, or poll
+# https://staging.princess.suhac.eu/api/health directly with a retry
+# loop — either works, the point is: don't skip this step.
+```
+
+Only the **app containers** scale down — Postgres, Garage, Zinc, and
+Qdrant are shared infrastructure serving every environment
+simultaneously (prod, staging, test.princess, CI), never staging-
+exclusive, and must never be scaled down as part of this cycle.
+
+**Promotion to `test.princess`**: after E2E passes against staging,
+promote the *exact same image* — no rebuild:
+
+```yaml
+promote_test:
+  stage: deploy
+  image: docker:24-cli
+  tags: [swarm-deploy]
+  script:
+    - docker service update --with-registry-auth --image "$CI_REGISTRY_IMAGE/nginx:main-$CI_COMMIT_SHORT_SHA" apps_princess-backend-test
+    - docker service update --with-registry-auth --image "$CI_REGISTRY_IMAGE/php:main-$CI_COMMIT_SHORT_SHA" apps_princess-backend-test-fpm
+```
+
+(Frontend's own pipeline does the equivalent for
+`apps_princess-frontend-test`.) Same `swarm-deploy` runner already used
+for staging/prod deploys — no new runner needed, `docker.sock` access
+isn't scoped per-service, so whichever project's pipeline orchestrates
+this can issue any of these commands. **Which pipeline actually
+orchestrates the full build→deploy→E2E→promote→scale-down sequence
+(frontend's, backend's, or cross-project triggering between the two) is
+a frontend/backend coordination question, not an infra one** — this repo
+just needs the targets to exist and be deployable, which they now are.
 
 ### Known limitations
 

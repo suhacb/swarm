@@ -36,6 +36,28 @@
 # E2eAuth middleware (app/Http/Middleware/E2eAuth.php) transparently
 # switches the request onto the isolated e2e_princess database.
 #
+# Topology changed 2026-07-16 (FE-CI-04): staging.princess.suhac.eu is now
+# automated-E2E-only, no human testers — the persistent human-facing QA
+# environment moved to test.princess.suhac.eu (the "-test" suffix below).
+# This is coherent, not a reversal of "E2E never touches staging": that
+# earlier decision protected staging's human-QA stability specifically,
+# which no longer applies now that staging isn't human-facing at all.
+# E2E still uses the existing e2e_princess isolation (X-E2E-Token header),
+# confirmed unchanged — staging's own stage_princess stays untouched by
+# automated runs, same as before.
+#
+# test.princess's backing resources use a "uat_"/"uat-" identifier prefix,
+# NOT "test_" — princess_backend's own CI/PHPUnit suite already owns
+# test_princess (a completely different, ephemeral-per-CI-run database);
+# reusing that name here would be a real, easy-to-hit collision waiting to
+# happen. The public hostname says "test", the backing resources say "uat"
+# — deliberate, not a typo.
+#
+# One shared princess-client Keycloak registration (princess-test realm)
+# serves both staging and test.princess — two redirect URIs registered
+# (https://staging.princess.suhac.eu/*, https://test.princess.suhac.eu/*),
+# not two separate clients. Same 11 test users, same realm, for both.
+#
 # Tracked in https://github.com/suhacb/swarm/issues/8 (supersedes #5).
 networks:
   public-ingress:
@@ -47,6 +69,8 @@ networks:
 
 secrets:
   princess_app_key:
+    external: true
+  princess_app_key_test:
     external: true
   princess_app_key_staging:
     external: true
@@ -350,6 +374,119 @@ services:
         constraints:
           - node.role == manager
 
+  princess-backend-test:
+    # Persistent human-facing QA environment (FE-CI-04, 2026-07-16) — NOT
+    # scaled down between pipeline runs, unlike staging below.
+    image: registry.suhac.eu/suhacb/princess_backend/nginx:latest
+    networks:
+      - public-ingress
+      - app-mesh
+    environment:
+      PHP_FPM_HOST: princess-backend-test-fpm:9000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 64M
+      update_config:
+        order: start-first
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  princess-backend-test-fpm:
+    image: registry.suhac.eu/suhacb/princess_backend/php:latest
+    networks:
+      - app-mesh
+      - data-mesh
+    # See princess-backend-fpm's comment above for why this wrapper exists:
+    # their app reads plain env vars (DB_PASSWORD etc.), not secret files.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        export APP_KEY="$$(cat /run/secrets/princess_app_key_test)" &&
+        export DB_PASSWORD="$$(cat /run/secrets/princess_db_password)" &&
+        export KEYCLOAK_CLIENT_SECRET="$$(cat /run/secrets/princess_test_keycloak_client_secret)" &&
+        export GARAGE_ACCESS_KEY_ID="$$(cat /run/secrets/princess_garage_key_id)" &&
+        export GARAGE_SECRET_ACCESS_KEY="$$(cat /run/secrets/princess_garage_secret_key)" &&
+        export GARAGE_ADMIN_TOKEN="$$(cat /run/secrets/garage_admin_token)" &&
+        export ONLYOFFICE_JWT_SECRET="$$(cat /run/secrets/onlyoffice_jwt_secret)" &&
+        exec /usr/local/bin/entrypoint.sh php-fpm -F
+    environment:
+      APP_NAME: princess_backend
+      APP_ENV: uat
+      APP_URL: https://test.princess.suhac.eu
+      DB_CONNECTION: pgsql
+      DB_HOST: data_postgres
+      DB_PORT: "5432"
+      # uat_, not test_ — princess_backend's own CI/PHPUnit suite already
+      # owns test_princess (a different, ephemeral-per-CI-run database).
+      # See this file's header comment for the full reasoning.
+      DB_DATABASE: uat_princess
+      DB_USERNAME: princess
+      SANCTUM_STATEFUL_DOMAINS: test.princess.suhac.eu
+      APP_FRONTEND_URL: https://test.princess.suhac.eu
+      AUTH_DRIVER: keycloak
+      KEYCLOAK_BASE_URL: https://keycloak.suhac.eu
+      # Same princess-test realm as staging, same 11 test users — one
+      # shared Keycloak client with two registered redirect URIs, not two
+      # separate clients. See this file's header comment.
+      KEYCLOAK_REALM: princess-test
+      KEYCLOAK_CLIENT_ID: princess-client
+      KEYCLOAK_REDIRECT_URI: https://test.princess.suhac.eu/api/auth/callback
+      KEYCLOAK_JWKS_CACHE_TTL: "3600"
+      AWS_ENDPOINT: http://shared-services_garage:3900
+      GARAGE_REGION: garage
+      GARAGE_ADMIN_URL: http://shared-services_garage:3903
+      GARAGE_S3_BUCKET_PREFIX: uat-princess
+      GARAGE_TEMPLATES_BUCKET: princess-templates
+      ONLYOFFICE_URL: http://shared-services_onlyoffice
+      ONLYOFFICE_PUBLIC_URL: https://onlyoffice.suhac.eu
+      ONLYOFFICE_CALLBACK_BASE_URL: http://princess-backend-test:8080
+      # QDRANT_*/ZINC_* — same caveats apply as princess-backend-fpm above.
+      QDRANT_URL: http://shared-services_qdrant:6333
+      QDRANT_COLLECTION_PREFIX: uat_princess
+      ZINC_URL: http://shared-services_zincsearch:4080
+      ZINC_INDEX_PREFIX: uat_princess
+      ZINC_USER: admin
+    secrets:
+      - princess_app_key_test
+      - princess_db_password
+      - princess_test_keycloak_client_secret
+      - princess_garage_key_id
+      - princess_garage_secret_key
+      - garage_admin_token
+      - onlyoffice_jwt_secret
+      - zincsearch_admin_password
+    # No healthcheck: see princess-backend-fpm's comment above — their
+    # image has no /bin/bash.
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 320M
+      update_config:
+        order: start-first
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
   princess-frontend:
     image: registry.suhac.eu/suhacb/princess_frontend:latest
     networks:
@@ -377,6 +514,36 @@ services:
           - node.role == manager
 
   princess-frontend-staging:
+    image: registry.suhac.eu/suhacb/princess_frontend:latest
+    networks:
+      - public-ingress
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 64M
+      update_config:
+        order: start-first
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      placement:
+        constraints:
+          - node.role == manager
+
+  princess-frontend-test:
+    # Persistent human-facing QA environment (FE-CI-04, 2026-07-16) — NOT
+    # scaled down between pipeline runs, unlike staging above. Promoted to
+    # by CD after staging's automated E2E run passes; same image, no
+    # separate build.
     image: registry.suhac.eu/suhacb/princess_frontend:latest
     networks:
       - public-ingress
