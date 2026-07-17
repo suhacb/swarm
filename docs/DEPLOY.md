@@ -1056,6 +1056,40 @@ that one line to `str_starts_with($prefix, 'e2e-princess')`, the guard will
 keep bailing out and the storage half of `/api/e2e/reset` will keep silently
 no-op'ing — the env var alone can't fix this, it's a one-line app-side fix.
 
+**`/api/e2e/reset`'s first real run against staging (2026-07-17) surfaced two
+more missing-env-var bugs, both now fixed, purely infra-side.** The frontend
+team's `e2e_staging`/`e2e_cleanup` CI jobs got a `401 E2E token required` on
+the very first call:
+
+1. **`E2E_TOKEN` was never wired into `apps-stack.yml` at all** — `E2eAuth`
+   middleware and the `e2e.only`-gated reset endpoint both read
+   `config('app.e2e_token')` <- `env('E2E_TOKEN')`, which was unset on every
+   princess backend (checked all three — prod and test.princess don't have
+   it either, so there was never an accidental auth-bypass exposure, just a
+   staging outage). Fixed: new secret `princess_e2e_token_staging`, wired
+   into staging's `-fpm` service only via the same wrapper-entrypoint
+   pattern as every other secret here. Deliberately **not** added to prod or
+   test.princess — this is a real auth bypass, not just a reset gate, and
+   should stay scoped to the one environment that's actually automated.
+2. **Once auth passed, the reset endpoint 500'd**: `SQLSTATE[08006] ...
+   database "princess_e2e" does not exist`. Same root cause, same fix shape
+   as the Garage prefix bug above — `DB_E2E_DATABASE` was never set by
+   infra, so the app fell back to its own default, `princess_e2e`, backwards
+   from every real database in this repo (`stage_princess`, `test_princess`,
+   `uat_princess` — env-identifier always comes first). Fixed by explicitly
+   setting `DB_E2E_DATABASE: e2e_princess` on staging's `-fpm` service,
+   pointing at the real, already-existing database. No backend code change
+   needed for this one, unlike the Garage guard bug — this was purely a
+   missing infra env var.
+
+**Verified end-to-end after both fixes**: `POST /api/e2e/reset` with the
+real `E2E_TOKEN` (value matches `princess_frontend`'s CI/CD variable of the
+same name) returns `{"status":"ok"}` / `200`, called 3× in a row with
+identical results (the actual thing the frontend team needed confirmed —
+repeatable, non-destructive-to-real-data calls against live staging).
+Confirmed `stage_princess` (real staging data) untouched across all 3 calls.
+A wrong token still correctly gets `401 Invalid E2E token`.
+
 ### Known limitations
 
 - **Memory is tight.** Current service memory *limits* already summed to

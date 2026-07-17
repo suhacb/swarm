@@ -90,6 +90,8 @@ secrets:
     external: true
   zincsearch_admin_password:
     external: true
+  princess_e2e_token_staging:
+    external: true
 
 services:
   princess-backend:
@@ -305,7 +307,16 @@ services:
         export GARAGE_SECRET_ACCESS_KEY="$$(cat /run/secrets/princess_garage_secret_key)" &&
         export GARAGE_ADMIN_TOKEN="$$(cat /run/secrets/garage_admin_token)" &&
         export ONLYOFFICE_JWT_SECRET="$$(cat /run/secrets/onlyoffice_jwt_secret)" &&
+        export E2E_TOKEN="$$(cat /run/secrets/princess_e2e_token_staging)" &&
         exec /usr/local/bin/entrypoint.sh php-fpm -F
+    # E2E_TOKEN was missing entirely (2026-07-17 finding) — E2eAuth's
+    # X-E2E-Token bypass and the e2e.only-gated /api/e2e/reset both read
+    # config('app.e2e_token') <- env('E2E_TOKEN'), which was never set on
+    # any princess backend, so it always 401'd regardless of what header
+    # value was sent. Set to staging ONLY — matches the value in
+    # princess_frontend's E2E_TOKEN CI/CD variable (what e2e_staging/
+    # e2e_cleanup jobs actually send). Deliberately absent from prod and
+    # test.princess: this is a real auth bypass, not just a reset gate.
     environment:
       APP_NAME: princess_backend
       APP_ENV: staging
@@ -315,6 +326,12 @@ services:
       DB_PORT: "5432"
       DB_DATABASE: stage_princess
       DB_USERNAME: princess
+      # DB_E2E_DATABASE (2026-07-17 finding): never set by infra, so the
+      # app fell back to its own default of princess_e2e — backwards from
+      # every real database here (stage_princess, test_princess,
+      # uat_princess all put the env identifier first). Explicitly
+      # overridden to the real, already-existing e2e_princess database.
+      DB_E2E_DATABASE: e2e_princess
       # See princess-backend-fpm's comment above re: SANCTUM_STATEFUL_DOMAINS
       # and APP_FRONTEND_URL / the cors.php string-concatenation bug — same
       # caveats apply, just the staging hostname.
@@ -358,6 +375,7 @@ services:
       - garage_admin_token
       - onlyoffice_jwt_secret
       - zincsearch_admin_password
+      - princess_e2e_token_staging
     # No healthcheck: see princess-backend-fpm's comment above — their
     # image has no /bin/bash, and this exact test killed this service
     # live before the fix was applied here too.
