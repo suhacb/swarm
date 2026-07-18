@@ -116,7 +116,7 @@ services:
         /etc/pgadmin/config_local.py.template > /pgadmin4/config_local.py &&
         exec /entrypoint.sh
     volumes:
-      - /Users/blazsuhac/Documents/projects/swarm/config/pgadmin/config_local.py.template:/etc/pgadmin/config_local.py.template:ro
+      - /Users/blazsuhac/dev/swarm/config/pgadmin/config_local.py.template:/etc/pgadmin/config_local.py.template:ro
       - /opt/swarm-data/pgadmin:/var/lib/pgadmin
     healthcheck:
       # This image's /bin/sh is NOT bash (confirmed live, same as Qdrant's

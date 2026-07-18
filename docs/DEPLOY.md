@@ -1,7 +1,7 @@
 # Deployment Runbook
 
 All commands assume you're running them **on the Mac Mini** (`10.10.10.202`),
-in the repo root (`/Users/blazsuhac/Documents/projects/swarm`), via Screen
+in the repo root (`/Users/blazsuhac/dev/swarm`), via Screen
 Sharing.
 
 ## 0. One-time Docker Desktop settings
@@ -52,7 +52,7 @@ yourself (this repo doesn't touch
 `/Library/LaunchDaemons/eu.suhac.certbot-renew.plist`):
 
 ```bash
-sudo certbot renew --deploy-hook /Users/blazsuhac/Documents/projects/swarm/scripts/certbot-deploy-hook.sh
+sudo certbot renew --deploy-hook /Users/blazsuhac/dev/swarm/scripts/certbot-deploy-hook.sh
 ```
 
 Run that once to confirm it works, then add the same `--deploy-hook` flag to

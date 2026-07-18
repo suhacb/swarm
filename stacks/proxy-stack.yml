@@ -61,9 +61,9 @@ services:
       # Bind-mounted (not Swarm configs) so editing files under config/nginx/
       # on the repo checkout takes effect on `docker service update --force`
       # without juggling versioned config objects.
-      - /Users/blazsuhac/Documents/projects/swarm/config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - /Users/blazsuhac/Documents/projects/swarm/config/nginx/conf.d:/etc/nginx/conf.d:ro
-      - /Users/blazsuhac/Documents/projects/swarm/config/nginx/snippets:/etc/nginx/snippets:ro
+      - /Users/blazsuhac/dev/swarm/config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /Users/blazsuhac/dev/swarm/config/nginx/conf.d:/etc/nginx/conf.d:ro
+      - /Users/blazsuhac/dev/swarm/config/nginx/snippets:/etc/nginx/snippets:ro
       # NOT /etc/letsencrypt directly: Certbot locks live/ and archive/ down
       # to root:wheel 0700, and Docker Desktop's file-sharing bridge runs as
       # the logged-in user, not root — it can't read those paths at any
