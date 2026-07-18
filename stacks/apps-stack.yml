@@ -324,13 +324,20 @@ services:
       DB_CONNECTION: pgsql
       DB_HOST: data_postgres
       DB_PORT: "5432"
-      DB_DATABASE: stage_princess
-      DB_USERNAME: princess
-      # DB_E2E_DATABASE (2026-07-17 finding): never set by infra, so the
-      # app fell back to its own default of princess_e2e — backwards from
-      # every real database here (stage_princess, test_princess,
-      # uat_princess all put the env identifier first). Explicitly
-      # overridden to the real, already-existing e2e_princess database.
+      # DB_DATABASE (2026-07-18, "Option B" — single-DB E2E): repointed from
+      # stage_princess to e2e_princess so staging's default connection, its
+      # cookie sessions, its users, and /api/e2e/reset all live in ONE
+      # database. This collapses the connection-routing split that broke
+      # cookie-based E2E auth (session was landing in stage_princess while
+      # the reset + seeded data lived in e2e_princess -> cookie-only request
+      # hit the wrong DB -> 401). Safe because staging is automated-E2E-only
+      # (FE-CI-04): stage_princess had no remaining consumer. See DEPLOY.md's
+      # E2E section for the full decision + the backend/frontend follow-ups.
+      DB_DATABASE: e2e_princess
+      # DB_E2E_DATABASE now coincides with DB_DATABASE (both e2e_princess);
+      # kept explicit so E2eController's DB::connection('e2e') and
+      # migrate:fresh --database=e2e still resolve. Can be simplified once
+      # the global E2eAuth impersonation branch is retired.
       DB_E2E_DATABASE: e2e_princess
       # See princess-backend-fpm's comment above re: SANCTUM_STATEFUL_DOMAINS
       # and APP_FRONTEND_URL / the cors.php string-concatenation bug — same

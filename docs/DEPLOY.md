@@ -1090,6 +1090,54 @@ repeatable, non-destructive-to-real-data calls against live staging).
 Confirmed `stage_princess` (real staging data) untouched across all 3 calls.
 A wrong token still correctly gets `401 Invalid E2E token`.
 
+### Cookie-based E2E: "Option B" single-DB consolidation (2026-07-18)
+
+When the frontend moved from per-request `X-E2E-Token` auth toward real
+cookie-based auth, their suite started 401ing (login → cookie → reset →
+same cookie → 401). Root cause (verified live against the running staging
+code + DBs, *not* the reported framing):
+
+- `/api/e2e/reset` operates **only** on the `e2e` connection (`e2e_princess`).
+- Cookie sessions (`SESSION_DRIVER=database`, default connection) were being
+  written to **`stage_princess`**, not `e2e_princess`.
+- `E2eAuth` is globally prepended and flips the default connection to `e2e`
+  only around the controller; `StartSession` reads/writes the cookie outside
+  that window. So the session + the seeded E2E user + the reset lived in
+  **different databases**, and the only thing routing a request to
+  `e2e_princess` was the per-request `X-E2E-Token` header — which the
+  cookie cutover removes. A cookie-only request therefore hit
+  `stage_princess`, where the E2E user/data don't exist → 401.
+
+The frontend's proposed fixes both missed: a session-preserving reset was
+already deployed (the non-`full` branch preserves `sessions`), and it was
+guarding the empty `e2e_princess.sessions`; a `SESSION_DRIVER` change targets
+storage, not the routing split.
+
+**Decision — Option B (single staging DB).** Since staging is now
+automated-E2E-only (FE-CI-04), `stage_princess` had no remaining consumer, so
+staging's default connection was repointed to `e2e_princess`
+(`apps-stack.yml`, `apps_princess-backend-fpm-staging` → `DB_DATABASE:
+e2e_princess`, deployed start-first, no downtime). Now sessions + users +
+seeded data + reset all live in one DB; cookie-only requests reach the E2E
+data; and the routing split is gone. Rejected alternative ("Option A"): keep
+two DBs and add a signed e2e-routing cookie + pre-`StartSession` middleware —
+more machinery to preserve an isolation the topology says is no longer needed.
+
+**Still required before the frontend's cookie cutover works end-to-end
+(not infra):**
+- Backend: `E2eController::reset()`'s non-`full` branch must also preserve
+  `users`/`people` (add to `$preserved`), or a mid-suite reset invalidates the
+  logged-in identity — and `E2eSeeder` must then be idempotent on those tables
+  (or split identity vs business-data seeding).
+- Backend: the `E2eSeeder` `external_id`s (`e2e-executive`, …) must correspond
+  to real Keycloak `princess-test` identities the frontend logs in as.
+- Backend (cleanup): retire the global `E2eAuth` Bearer→`Auth::login`
+  impersonation once the cookie flow is confirmed; keep only the `e2e.only`
+  gate on `/api/e2e/reset`.
+- Frontend: on standby until the above lands — then drop `X-E2E-Token` from
+  all requests except `POST /api/e2e/reset`, and authenticate via real
+  Keycloak cookie login.
+
 ### Known limitations
 
 - **Memory is tight.** Current service memory *limits* already summed to
