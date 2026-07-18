@@ -334,6 +334,7 @@ services:
       # (FE-CI-04): stage_princess had no remaining consumer. See DEPLOY.md's
       # E2E section for the full decision + the backend/frontend follow-ups.
       DB_DATABASE: e2e_princess
+      DB_USERNAME: princess
       # DB_E2E_DATABASE now coincides with DB_DATABASE (both e2e_princess);
       # kept explicit so E2eController's DB::connection('e2e') and
       # migrate:fresh --database=e2e still resolve. Can be simplified once
