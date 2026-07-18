@@ -199,9 +199,13 @@ if [ ! -f "$TEST_USERS_CSV" ]; then
   exit 1
 fi
 
-# username,full_name,project_role,group,password
-tail -n +2 "$TEST_USERS_CSV" | while IFS=',' read -r USERNAME FULL_NAME PROJECT_ROLE GROUP PASSWORD; do
+# username,full_name,email,project_role,group,password
+tail -n +2 "$TEST_USERS_CSV" | while IFS=',' read -r USERNAME FULL_NAME EMAIL PROJECT_ROLE GROUP PASSWORD; do
   [ -z "$USERNAME" ] && continue
+  # Fallback keeps pre-email-column CSVs working; the canonical value is the
+  # CSV column now, so login-time reconciliation (Person is linked by email)
+  # can be adjusted here in one place instead of in this script's logic.
+  EMAIL="${EMAIL:-${USERNAME}@princess-test.suhac.eu}"
   USER_ID=$(kcadm get users -r "$TEST_REALM" -q "username=$USERNAME" --fields id --format csv --noquotes | tail -n1)
   if [ -z "$USER_ID" ]; then
     FIRST_NAME="${FULL_NAME%% *}"
@@ -211,7 +215,7 @@ tail -n +2 "$TEST_USERS_CSV" | while IFS=',' read -r USERNAME FULL_NAME PROJECT_
       -s enabled=true \
       -s firstName="$FIRST_NAME" \
       -s lastName="$LAST_NAME" \
-      -s email="${USERNAME}@princess-test.suhac.eu" \
+      -s email="$EMAIL" \
       -s emailVerified=true \
       -s attributes.projectRole="[\"$PROJECT_ROLE\"]")
     # temporary=false and no requiredActions: this realm has no MFA, and
