@@ -129,7 +129,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -255,7 +255,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -284,7 +284,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -389,7 +389,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -420,7 +420,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -502,7 +502,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -528,7 +528,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -554,7 +554,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
@@ -584,7 +584,7 @@ services:
         order: start-first
         failure_action: rollback
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:

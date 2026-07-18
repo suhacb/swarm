@@ -84,7 +84,7 @@ services:
         # boot before the data stack is deployed at all — let it crash-loop
         # with a backoff until Postgres is reachable rather than only trying
         # once.
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:

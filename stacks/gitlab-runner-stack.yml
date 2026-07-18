@@ -104,7 +104,7 @@ services:
           # via --docker-memory above.
           memory: 256M
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 10s
       placement:
         constraints:
